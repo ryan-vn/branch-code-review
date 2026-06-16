@@ -2,6 +2,21 @@
 
 Use this checklist selectively. Prioritize sections that match the changed files and affected flows.
 
+**Required companion docs:**
+
+- `bug-hunting-checklist.md` — find concrete bugs and regressions (required every review).
+- `security-checklist.md` — when auth, input, secrets, crypto, or deps changed.
+- `testing-review.md` — when judging whether behavior is actually covered.
+
+## Bug Hunting
+
+- Start from `Bug Hunt Queue` and `Bug Pattern Hints` in the context script output.
+- For each high-risk file: what can go wrong, who breaks, how to trigger it.
+- Compare behavior at branch start vs `HEAD` for guards, defaults, and error paths.
+- Trace at least one failure path from trigger to user-visible outcome before reporting.
+- Run focused tests or minimal repro when possible.
+- Escalate to `review-bugbot` when the branch is too large for complete manual tracing.
+
 ## Branch And Diff
 
 - Confirm branch start, head, commit range, and any optional merge-base context.

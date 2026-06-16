@@ -173,6 +173,39 @@ RUST_SYMBOL_RE = re.compile(
     re.MULTILINE,
 )
 
+SCAN_RULES: list[tuple[str, str, re.Pattern[str]]] = [
+    ("security", "possible_aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("security", "possible_private_key_header", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
+    ("security", "possible_hardcoded_secret", re.compile(r"(?i)(api[_-]?key|secret|password|token|auth)\s*[:=]\s*['\"][^'\"]{8,}['\"]")),
+    ("security", "possible_bearer_token", re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*")),
+    ("security", "dangerous_eval", re.compile(r"\beval\s*\(")),
+    ("security", "dangerous_exec", re.compile(r"\bexec\s*\(")),
+    ("security", "dangerous_pickle_loads", re.compile(r"\bpickle\.loads\s*\(")),
+    ("security", "dangerous_yaml_load", re.compile(r"\byaml\.load\s*\((?!.*Loader\s*=\s*yaml\.SafeLoader)")),
+    ("security", "sql_string_concat", re.compile(r"(?i)(SELECT|INSERT|UPDATE|DELETE).*(?:\+|%|f['\"]|\.format\()")),
+    ("security", "dangerously_set_inner_html", re.compile(r"dangerouslySetInnerHTML")),
+    ("security", "tls_verification_disabled", re.compile(r"(?i)(rejectUnauthorized\s*:\s*false|InsecureSkipVerify\s*:\s*true)")),
+    ("bug", "empty_catch_block", re.compile(r"catch\s*\([^)]*\)\s*\{\s*\}")),
+    ("bug", "except_pass", re.compile(r"except\s*:\s*pass\b")),
+    ("bug", "ignored_promise", re.compile(r"^\s*[^/\n].*\(\)\s*;\s*$")),  # too noisy, skip
+    ("bug", "missing_await_hint", re.compile(r"^\s*(?:const|let|var)\s+\w+\s*=\s*[^;]*\.(?:then|catch)\(")),
+    ("bug", "loose_equality", re.compile(r"[^=!]==[^=]")),
+    ("bug", "todo_fixme_hack", re.compile(r"(?i)\b(TODO|FIXME|HACK|XXX)\b.*")),
+    ("bug", "console_log_leftover", re.compile(r"\bconsole\.(?:log|debug|info)\s*\(")),
+    ("bug", "debugger_statement", re.compile(r"\bdebugger\b")),
+    ("bug", "return_null_early", re.compile(r"return\s+null\s*;")),
+]
+
+REMOVED_LINE_RULES: list[tuple[str, str, re.Pattern[str]]] = [
+    ("bug", "removed_throw_or_raise", re.compile(r"\b(throw|raise)\b")),
+    ("bug", "removed_error_return", re.compile(r"return\s+(err|error|False|null|None)\b")),
+    ("bug", "removed_validation_guard", re.compile(r"if\s+.*(?:null|undefined|None|empty|length|size|auth|permission|valid)")),
+    ("bug", "removed_catch_handler", re.compile(r"\bcatch\b|\bexcept\b")),
+]
+
+# Remove overly noisy rules after definition
+SCAN_RULES = [rule for rule in SCAN_RULES if rule[1] != "ignored_promise"]
+
 
 def run_git(args: list[str], cwd: Path, check: bool = True) -> str:
     result = subprocess.run(
@@ -202,16 +235,197 @@ def infer_branch_start(repo: Path, branch: str) -> tuple[str, str]:
         raise SystemExit("Could not infer branch start in detached HEAD. Re-run with --start <commit-or-ref>.")
 
     reflog_ref = f"refs/heads/{branch}"
-    raw = run_git(["reflog", "show", "--reverse", "--format=%H", reflog_ref], repo, check=False)
+    raw = run_git(["reflog", "show", "--format=%H", reflog_ref], repo, check=False)
     hashes = [line.strip() for line in raw.splitlines() if line.strip()]
     if hashes:
-        return hashes[0], f"oldest reflog entry for {reflog_ref}"
+        return hashes[-1], f"oldest reflog entry for {reflog_ref}"
 
     raise SystemExit(
         "Could not infer current branch start from reflog. "
         "Re-run with --start <branch-start-commit-or-ref>. "
         "This script does not fall back to the default branch."
     )
+
+
+def resolve_start(repo: Path, branch: str, start_arg: str | None, start_mode: str) -> tuple[str, str]:
+    if start_arg:
+        return start_arg, "provided via --start"
+    if start_mode.startswith("merge-base-with="):
+        base = start_mode.split("=", 1)[1].strip()
+        if not base:
+            raise SystemExit("--start-mode merge-base-with= requires a ref, e.g. origin/main")
+        merge_base = run_git(["merge-base", "HEAD", base], repo)
+        return merge_base, f"merge-base of HEAD and {base}"
+    if start_mode != "reflog":
+        raise SystemExit(f"Unknown --start-mode: {start_mode}. Use reflog or merge-base-with=<ref>.")
+    return infer_branch_start(repo, branch)
+
+
+def collect_diff_text(repo: Path, start: str, include_working_tree: bool) -> str:
+    parts = [run_git(["diff", "-U3", f"{start}..HEAD"], repo, check=False)]
+    if include_working_tree:
+        parts.append(run_git(["diff", "-U3", "--cached"], repo, check=False))
+        parts.append(run_git(["diff", "-U3"], repo, check=False))
+    return "\n".join(part for part in parts if part)
+
+
+def parse_added_lines(diff_text: str) -> dict[str, list[tuple[int, str]]]:
+    result: dict[str, list[tuple[int, str]]] = defaultdict(list)
+    current_file: str | None = None
+    new_line_no = 0
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            current_file = None
+            continue
+        if line.startswith("+++ b/"):
+            current_file = line[6:].strip()
+            if current_file == "/dev/null":
+                current_file = None
+            continue
+        if line.startswith("@@"):
+            match = re.search(r"\+(\d+)", line)
+            new_line_no = int(match.group(1)) if match else 0
+            continue
+        if not current_file:
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            result[current_file].append((new_line_no, line[1:]))
+            new_line_no += 1
+        elif line.startswith(" "):
+            new_line_no += 1
+    return dict(result)
+
+
+def parse_removed_lines(diff_text: str) -> dict[str, list[tuple[int, str]]]:
+    result: dict[str, list[tuple[int, str]]] = defaultdict(list)
+    current_file: str | None = None
+    old_line_no = 0
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            current_file = None
+            continue
+        if line.startswith("--- a/"):
+            current_file = line[6:].strip()
+            if current_file == "/dev/null":
+                current_file = None
+            continue
+        if line.startswith("@@"):
+            match = re.search(r"-(\d+)", line)
+            old_line_no = int(match.group(1)) if match else 0
+            continue
+        if not current_file:
+            continue
+        if line.startswith("-") and not line.startswith("---"):
+            result[current_file].append((old_line_no, line[1:]))
+            old_line_no += 1
+        elif line.startswith(" "):
+            old_line_no += 1
+    return dict(result)
+
+
+def scan_removed_lines(removed_lines_by_file: dict[str, list[tuple[int, str]]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for path, lines in sorted(removed_lines_by_file.items()):
+        if not is_source_file(path):
+            continue
+        for line_no, content in lines:
+            stripped = content.strip()
+            if not stripped:
+                continue
+            for category, rule_id, pattern in REMOVED_LINE_RULES:
+                if pattern.search(content):
+                    findings.append(
+                        {
+                            "path": path,
+                            "line": line_no,
+                            "category": category,
+                            "rule": rule_id,
+                            "snippet": stripped[:200],
+                            "change": "removed",
+                        }
+                    )
+    return findings
+
+
+def collect_line_changes(
+    repo: Path,
+    start: str,
+    analysis_files: list[dict[str, Any]],
+    include_working_tree: bool,
+) -> tuple[dict[str, list[tuple[int, str]]], dict[str, list[tuple[int, str]]]]:
+    diff_text = collect_diff_text(repo, start, include_working_tree)
+    added = parse_added_lines(diff_text)
+    removed = parse_removed_lines(diff_text)
+    for item in analysis_files:
+        if item["status"][0] == "D":
+            continue
+        path = item["path"]
+        if "untracked" not in item.get("sources", []):
+            continue
+        if not (is_source_file(path) or is_config_file(path) or is_dependency_file(path)):
+            continue
+        text = read_head_file(repo, path)
+        if text:
+            added[path] = [(index + 1, line) for index, line in enumerate(text.splitlines())]
+    return added, removed
+
+
+def scan_added_lines(added_lines_by_file: dict[str, list[tuple[int, str]]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for path, lines in sorted(added_lines_by_file.items()):
+        if not (is_source_file(path) or is_config_file(path) or is_dependency_file(path)):
+            continue
+        for line_no, content in lines:
+            stripped = content.strip()
+            if not stripped or stripped.startswith("//") or stripped.startswith("#"):
+                continue
+            for category, rule_id, pattern in SCAN_RULES:
+                if pattern.search(content):
+                    findings.append(
+                        {
+                            "path": path,
+                            "line": line_no,
+                            "category": category,
+                            "rule": rule_id,
+                            "snippet": stripped[:200],
+                            "change": "added",
+                        }
+                    )
+    return findings
+
+
+def scan_line_changes(
+    added_lines_by_file: dict[str, list[tuple[int, str]]],
+    removed_lines_by_file: dict[str, list[tuple[int, str]]],
+) -> list[dict[str, Any]]:
+    return scan_added_lines(added_lines_by_file) + scan_removed_lines(removed_lines_by_file)
+
+
+def build_bug_hunt_queue(risk_targets: list[dict[str, Any]], pattern_findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    bug_hint_counts: dict[str, int] = defaultdict(int)
+    security_hint_counts: dict[str, int] = defaultdict(int)
+    for finding in pattern_findings:
+        if finding["category"] == "bug":
+            bug_hint_counts[finding["path"]] += 1
+        elif finding["category"] == "security":
+            security_hint_counts[finding["path"]] += 1
+
+    queue: list[dict[str, Any]] = []
+    for target in risk_targets:
+        path = target["path"]
+        bug_hints = bug_hint_counts.get(path, 0)
+        security_hints = security_hint_counts.get(path, 0)
+        bug_hunt_score = target["score"] + bug_hints * 3 + security_hints * 4
+        queue.append(
+            {
+                **target,
+                "bug_hint_count": bug_hints,
+                "security_hint_count": security_hints,
+                "bug_hunt_score": bug_hunt_score,
+            }
+        )
+    queue.sort(key=lambda value: (-value["bug_hunt_score"], -value["bug_hint_count"], value["path"]))
+    return queue
 
 
 def parse_name_status(raw: str, source: str) -> list[dict[str, Any]]:
@@ -893,6 +1107,18 @@ def build_report(data: dict[str, Any]) -> str:
         ]
         for target in data["risk_targets"][:25]
     ]
+    bug_hunt_rows = [
+        [
+            str(target["bug_hunt_score"]),
+            f"`{target['path']}`",
+            str(target["bug_hint_count"]),
+            str(target["security_hint_count"]),
+            "; ".join(target["reasons"][:3]),
+        ]
+        for target in data["bug_hunt_queue"][:25]
+    ]
+    bug_findings = [finding for finding in data["pattern_findings"] if finding["category"] == "bug"]
+    security_findings = [finding for finding in data["pattern_findings"] if finding["category"] == "security"]
 
     lines = [
         "# Branch Review Context",
@@ -902,6 +1128,7 @@ def build_report(data: dict[str, Any]) -> str:
         f"- Repository: `{data['repo']}`",
         f"- Branch start: `{data['start']}`",
         f"- Start inference: {data['start_source']}",
+        f"- Start mode: `{data['start_mode']}`",
         f"- Head: `{data['head']}`",
         f"- Current branch: `{data['branch']}`",
         f"- Range: `{data['range']}`",
@@ -949,27 +1176,88 @@ def build_report(data: dict[str, Any]) -> str:
         "",
         markdown_list([item["path"] for item in data["untracked_files"]]),
         "",
-        "## No-CodeGraph Impact Triage",
+        "## Bug Hunt Queue",
         "",
-        "Use this as a review queue when CodeGraph is unavailable. Inspect the high-scoring files and their dependent hints first.",
+        "Prioritize manual bug hunting here. Score combines impact risk, bug-pattern hints, and security-pattern hints.",
         "",
-        markdown_table(risk_rows, ["Score", "File", "Categories", "Reasons"]),
+        markdown_table(bug_hunt_rows, ["Score", "File", "Bug hints", "Security hints", "Reasons"]),
         "",
-        "## New Directories",
+        "## Bug Pattern Hints",
         "",
-        markdown_list(data["new_directories"]),
-        "",
-        "## Dependency Files Changed",
-        "",
-        markdown_list(data["dependency_files"]),
-        "",
-        "### Dependency Consistency Warnings",
-        "",
-        markdown_plain_list(data["dependency_warnings"]),
-        "",
-        "### package.json Dependency Deltas",
+        "Automated leads only — validate in context before reporting as findings.",
         "",
     ]
+
+    if bug_findings:
+        lines.extend(
+            markdown_table(
+                [
+                    [
+                        f"`{finding['path']}:{finding['line']}`",
+                        finding.get("change", "added"),
+                        finding["rule"],
+                        finding["snippet"].replace("|", "\\|"),
+                    ]
+                    for finding in bug_findings[:40]
+                ],
+                ["Location", "Change", "Rule", "Snippet"],
+            ).splitlines()
+        )
+        lines.append("")
+    else:
+        lines.extend(["- No bug pattern hints detected in added/changed lines.", ""])
+
+    lines.extend(
+        [
+            "## Security Pattern Hints",
+            "",
+            "Automated leads only — many are false positives. Confirm in source before reporting.",
+            "",
+        ]
+    )
+
+    if security_findings:
+        lines.extend(
+            markdown_table(
+                [
+                    [
+                        f"`{finding['path']}:{finding['line']}`",
+                        finding["rule"],
+                        finding["snippet"].replace("|", "\\|"),
+                    ]
+                    for finding in security_findings[:40]
+                ],
+                ["Location", "Rule", "Snippet"],
+            ).splitlines()
+        )
+        lines.append("")
+    else:
+        lines.extend(["- No security pattern hints detected in added/changed lines.", ""])
+
+    lines.extend(
+        [
+            "## No-CodeGraph Impact Triage",
+            "",
+            "Use this as a review queue when CodeGraph is unavailable. Inspect the high-scoring files and their dependent hints first.",
+            "",
+            markdown_table(risk_rows, ["Score", "File", "Categories", "Reasons"]),
+            "",
+            "## New Directories",
+            "",
+            markdown_list(data["new_directories"]),
+            "",
+            "## Dependency Files Changed",
+            "",
+            markdown_list(data["dependency_files"]),
+            "",
+            "### Dependency Consistency Warnings",
+            "",
+            markdown_plain_list(data["dependency_warnings"]),
+            "",
+            "### package.json Dependency Deltas",
+            "",
+        ]
+    )
 
     if data["package_dependency_deltas"]:
         for path, sections in data["package_dependency_deltas"].items():
@@ -1089,8 +1377,13 @@ def build_report(data: dict[str, Any]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--start", help="Branch start commit or ref. Defaults to the oldest current-branch reflog entry.")
+    parser.add_argument("--start", help="Branch start commit or ref. Defaults to --start-mode reflog inference.")
     parser.add_argument("--base", help="Deprecated alias for --start.")
+    parser.add_argument(
+        "--start-mode",
+        default="reflog",
+        help="How to infer branch start when --start is omitted: reflog (default) or merge-base-with=<ref>.",
+    )
     parser.add_argument("--output", help="Markdown output path. Defaults to stdout.")
     parser.add_argument("--json-output", help="Optional JSON output path.")
     parser.add_argument(
@@ -1102,14 +1395,9 @@ def main() -> None:
 
     repo = repo_root(Path.cwd())
     branch = current_branch(repo)
-    if args.start:
-        start = args.start
-        start_source = "provided via --start"
-    elif args.base:
-        start = args.base
-        start_source = "provided via deprecated --base alias"
-    else:
-        start, start_source = infer_branch_start(repo, branch)
+    start_arg = args.start or args.base
+    start, start_source = resolve_start(repo, branch, start_arg, args.start_mode)
+    start_mode = args.start_mode if not start_arg else "explicit"
 
     review_range = f"{start}..HEAD"
     head = run_git(["rev-parse", "--short", "HEAD"], repo)
@@ -1150,6 +1438,10 @@ def main() -> None:
     ]
     risk_targets.sort(key=lambda value: (-value["score"], value["path"]))
 
+    added_lines, removed_lines = collect_line_changes(repo, start, analysis_files, args.include_working_tree)
+    pattern_findings = scan_line_changes(added_lines, removed_lines)
+    bug_hunt_queue = build_bug_hunt_queue(risk_targets, pattern_findings)
+
     numstat = parse_numstat(run_git(["diff", "--numstat", review_range], repo))
     dependency_files = sorted(path for path in changed_paths if is_dependency_file(path))
     shared_files = sorted(path for path in changed_paths if is_shared_file(path))
@@ -1163,6 +1455,7 @@ def main() -> None:
         "repo": str(repo),
         "start": start,
         "start_source": start_source,
+        "start_mode": start_mode,
         "head": head,
         "branch": branch,
         "range": review_range,
@@ -1194,6 +1487,8 @@ def main() -> None:
         "test_neighbors": test_neighbors,
         "test_commands": detect_test_commands(repo),
         "risk_targets": risk_targets,
+        "pattern_findings": pattern_findings,
+        "bug_hunt_queue": bug_hunt_queue,
         "diff_stat": run_git(["diff", "--stat", review_range], repo, check=False),
     }
 

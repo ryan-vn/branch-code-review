@@ -1,4 +1,4 @@
 interface:
   display_name: "Branch Code Review"
-  short_description: "Review branch diffs with local impact triage"
-  default_prompt: "Use $branch-code-review to review all code developed on the current branch since the branch was created, include working tree changes, and produce a risk-focused report using CodeGraph when available or the no-CodeGraph local impact map when it is not."
+  short_description: "Review branch code with bug hunting and impact triage"
+  default_prompt: "Use $branch-code-review to review all code developed on the current branch since the branch was created. Include working tree changes, run the context collection script, hunt for concrete bugs and regressions using the bug hunt queue and checklists, use CodeGraph when available or the no-CodeGraph local impact map when it is not, and produce a risk-focused report with bugs first. Escalate to review-bugbot or review-security when warranted."
