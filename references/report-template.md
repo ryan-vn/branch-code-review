@@ -6,6 +6,8 @@
 - **Release risk**: High / Medium / Low
 - **Must-fix before merge**:
 - **Start mode**: branch-local reflog / explicit `--start` / merge-base-with=…
+- **Review mode**: Multi-agent / Single-agent fallback
+- **Agents run**: Impact / Bug Hunt / Security / Bugbot / Verification
 - **Review confidence**: High / Medium / Low
 
 ## Findings
@@ -15,6 +17,7 @@ List bugs and regressions before other finding types when severities tie.
 ### P0 Title
 
 - Location: `path/to/file.ext:line`
+- Source: [Bug Hunt] / [Impact] / [Security] / [Bugbot] / [Orchestrator]
 - Type: Bug / Regression / Security / Test gap / …
 - Confidence: High / Medium / Low
 - Trigger: User action, input, or sequence that exposes the issue.
@@ -27,6 +30,7 @@ List bugs and regressions before other finding types when severities tie.
 ### P1/P2/P3 Title
 
 - Location: `path/to/file.ext:line`
+- Source: [Bug Hunt] / [Impact] / [Security] / [Bugbot] / [Orchestrator]
 - Type:
 - Confidence:
 - Trigger:
@@ -92,3 +96,14 @@ List bugs and regressions before other finding types when severities tie.
 - Second passes (Bugbot / Security Review):
 - Not run:
 - Residual risk:
+
+## Agent Coverage
+
+- Review mode: Multi-agent / Single-agent
+- Impact Agent: ran / skipped — artifact `work/branch-review-impact.md`
+- Bug Hunt Agent: ran / skipped — artifact `work/branch-review-bugs.md`
+- Security Agent: ran / skipped / not applicable — artifact `work/branch-review-security.md`
+- Bugbot pass: ran / skipped
+- Verification Agent: ran / skipped
+- Files not deeply reviewed:
+- Merge notes (deduped findings, agent disagreements):

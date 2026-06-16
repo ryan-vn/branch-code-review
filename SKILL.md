@@ -1,6 +1,17 @@
 ---
 name: branch-code-review
-description: "Review all code developed on the current branch since the branch was created or checked out from its starting point, with whole-branch impact analysis and bug-focused findings. Use when Codex needs to code review branch-local work without comparing to the default branch, including added files, file tree changes, modified files, dependent files, public components, shared/common files, dependency/package changes, routes/APIs, tests, security hints, bug pattern hints, risk-focused findings, and a strong no-CodeGraph fallback using local import/symbol/reference/test impact analysis."
+description: >-
+  Reviews all code developed on the current branch since branch creation or checkout,
+  using multi-agent orchestration (impact, bug hunt, security), whole-branch impact
+  analysis, and bug-focused findings. Use when reviewing a feature branch, WIP changes,
+  branch-local diffs, shared-surface impact, dependency changes, or when the user asks
+  for branch code review, bug hunting on a branch, or review since branch was created.
+disable-model-invocation: true
+metadata:
+  author: ryan-vn
+  repository: https://github.com/ryan-vn/branch-code-review
+  license: MIT
+  version: "1.1.0"
 ---
 
 # Branch Code Review
@@ -11,207 +22,156 @@ Use this skill to review an entire branch, not only isolated diff hunks. The rev
 
 **Primary deliverable: actionable bug and regression findings.** Impact maps, inventories, and architecture notes support bug hunting but do not replace it.
 
+## Multi-Agent Mode (Default)
+
+Unless the user asks for a **quick** or **single-agent** review, run **multi-agent orchestration**.
+
+Read and follow `references/multi-agent-orchestration.md` completely.
+
+```text
+Phase 0  Orchestrator → collect context (script) + branch metadata
+Phase 1  Parallel     → Impact Agent + Bug Hunt Agent [+ Security Agent]
+Phase 2  Sequential   → Bugbot (large branch) + Verification (tests)
+Phase 3  Orchestrator → merge artifacts → final report
+```
+
+| Agent | Tool | Output |
+|-------|------|--------|
+| Orchestrator | current agent | `work/branch-review-context.md`, final report |
+| Impact Agent | Task `explore`, readonly | `work/branch-review-impact.md` |
+| Bug Hunt Agent | Task `generalPurpose`, readonly | `work/branch-review-bugs.md` |
+| Security Agent | Task `security-review`, readonly | `work/branch-review-security.md` |
+| Bugbot Agent | Task `bugbot`, readonly | merged into final report |
+| Verification Agent | Task `shell` | verification notes in final report |
+
+Dispatch Impact + Bug Hunt (+ Security when applicable) **in one message with parallel Task calls**. Subagents get **self-contained prompts** from the orchestration doc — never rely on chat history.
+
+After subagents return, merge with dedupe rules in the orchestration doc and produce the report from `references/report-template.md`.
+
+**Single-agent fallback:** quick review, empty diff, context script failure, or Task dispatch unavailable → run the monolithic workflow below without subagents.
+
 ## When To Use
 
 | Scenario | Use this skill |
 |----------|----------------|
-| Local feature branch — full review since branch creation | Yes |
+| Local feature branch — full review since branch creation | Yes (multi-agent default) |
 | WIP with uncommitted changes included | Yes |
 | Need caller/impact analysis without default-branch diff | Yes |
-| PR merge diff vs `main` only | Optional: add `--start-mode merge-base-with=origin/main` or run `review-bugbot` as second pass |
-| Dedicated security pass | Run this first, then `review-security` if hints or auth/crypto surfaces appear |
+| Quick sanity check | Yes — user says "quick" → single-agent |
+| PR merge diff vs `main` only | `--start-mode merge-base-with=origin/main` or Bugbot pass |
 
 ## Inputs
 
 Require or infer:
 
 - Target repository root.
-- Current branch start commit. Prefer the oldest reflog entry for the current branch, because it represents where the branch was created or checked out locally.
-- Optional `--start-mode merge-base-with=<ref>` when the user wants PR-oriented range instead of branch-local range. State which mode was used.
-- If the branch start cannot be inferred from git reflog, ask the user for the branch start commit/ref. Do not silently fall back to `origin/main`, `origin/master`, `main`, `master`, or another default branch unless the user explicitly requests merge-base mode.
-- Review scope: default to `git diff <branch-start>..HEAD`.
+- Current branch start commit. Prefer the oldest reflog entry for the current branch.
+- Optional `--start-mode merge-base-with=<ref>` for PR-oriented range.
+- If branch start cannot be inferred, ask the user for `--start`. Do not silently fall back to default branch unless merge-base mode is requested.
+- Review scope: default `git diff <branch-start>..HEAD`.
 
-Before analysis, check `git status --short --branch`. If there are uncommitted changes, state whether they are included. Do not discard or revert user changes.
+Before analysis, check `git status --short --branch`. State whether uncommitted changes are included.
 
 ## Fast Context Collection
 
-Run the bundled script from the repository root when local git history is available. Include working tree changes unless the user explicitly asks for committed-only review:
+Run from repository root (Orchestrator Phase 0):
 
 ```bash
 python3 <skill-dir>/scripts/collect_branch_review_context.py --include-working-tree --output work/branch-review-context.md --json-output work/branch-review-context.json
 ```
 
-The script tries to infer the current branch start from the branch reflog. If that fails, pass the exact branch start commit or ref:
+With explicit start or merge-base mode — see `references/multi-agent-orchestration.md`.
 
-```bash
-python3 <skill-dir>/scripts/collect_branch_review_context.py --start <branch-start-commit-or-ref> --include-working-tree --output work/branch-review-context.md --json-output work/branch-review-context.json
-```
-
-For PR-oriented range against a target branch:
-
-```bash
-python3 <skill-dir>/scripts/collect_branch_review_context.py --start-mode merge-base-with=origin/main --include-working-tree --output work/branch-review-context.md --json-output work/branch-review-context.json
-```
-
-Use the generated Markdown/JSON as a starting map, not as the final review. It includes committed inventory, staged/unstaged/untracked inventory, test command candidates, dependency deltas, resolved local importers, public symbol candidate deltas, symbol reference hints, deleted-file reference hints, nearby/importing test hints, **bug pattern hints**, **security pattern hints**, a **bug hunt queue**, and a risk-ranked no-CodeGraph triage queue. Verify high-risk areas by reading source and **prove bugs before reporting them**.
+Context includes: inventory, bug hunt queue, bug/security pattern hints, impact triage, dependency deltas, test commands. Subagents and orchestrator must read this file — do not substitute ad-hoc git diffs alone.
 
 ## Bug Hunting (Required)
 
-After context collection, actively search for bugs — do not stop at impact analysis.
+Owned by **Bug Hunt Agent** in multi-agent mode; orchestrator validates merge quality.
 
-1. Read `references/bug-hunting-checklist.md` and work through it for changed control flow, data contracts, and integration wiring.
-2. Start from `Bug Hunt Queue` and `Bug Pattern Hints` in the context report; treat each hint as a lead to validate or dismiss with evidence.
-3. For every high-risk file, answer: **What can go wrong? Who breaks? How do I trigger it?**
-4. Compare behavior at branch start vs `HEAD` for shared modules and entry points — look for removed guards, changed defaults, and deleted error paths.
-5. Run focused tests or minimal reproduction when feasible; a failing test is stronger evidence than static reading.
-6. If manual bug hunting is incomplete on a large branch, run `review-bugbot` as a second pass and deduplicate findings.
+1. Read `references/bug-hunting-checklist.md`.
+2. Start from Bug Hunt Queue and Bug Pattern Hints; validate hints in source.
+3. For each high-risk file: **What can go wrong? Who breaks? How do I trigger it?**
+4. Compare branch start vs `HEAD` for removed guards and error paths.
+5. Run focused tests when feasible.
 
-Report bugs with: trigger, expected vs actual, evidence (file:line or trace), severity, suggested fix.
+Report bugs with: trigger, expected vs actual, evidence, severity, suggested fix, confidence.
 
 ## Security Pass (When Applicable)
 
-When auth, user input, secrets, crypto, uploads, admin tools, dependencies, or infra config changed:
+Owned by **Security Agent** in multi-agent mode when security surfaces or hints exist.
 
 1. Read `references/security-checklist.md`.
-2. Inspect `Security Pattern Hints` from the context script; confirm or dismiss each in source.
-3. Escalate to `review-security` when exploitation path is unclear or impact is high.
+2. Confirm or dismiss Security Pattern Hints.
+3. Use `security-review` subagent per orchestration doc.
 
 ## Structural Analysis
 
-When a CodeGraph MCP server is available, prefer it for structural questions:
+When CodeGraph MCP is available:
 
-- Use `codegraph_context` for focused context around changed areas.
-- Use `codegraph_impact` for changed exported functions, components, hooks, services, utilities, routes, and shared modules.
-- Use `codegraph_callers` for specific changed functions/classes whose callers matter.
-- Use `codegraph_trace` for user-facing flows, API-to-state paths, callback chains, and React/JSX dynamic hops — **especially when hunting logic bugs across hops**.
-- Use native search only for literal strings, comments, logs, config values, and after a specific file is already identified.
+- `codegraph_context` — focused context
+- `codegraph_impact` — changed exports/shared modules (Impact Agent)
+- `codegraph_callers` — shared surface callers
+- `codegraph_trace` — user-facing / API flows (Bug Hunt Agent)
 
-If CodeGraph reports that the project is not initialized, ask whether to run `codegraph init -i`.
+If CodeGraph is not initialized, ask whether to run `codegraph init -i`.
 
 ## No-CodeGraph Impact Mode
 
-When CodeGraph is unavailable, not installed, not initialized, or not exposed in the current tool list, do not downgrade to a shallow diff review. Treat `work/branch-review-context.md` and `work/branch-review-context.json` as the local impact map:
+When CodeGraph is unavailable, use `work/branch-review-context.md` as the local impact map. Do not downgrade to grep-only review. Impact Agent and Bug Hunt Agent must still read highest-risk files directly.
 
-- Start with `Bug Hunt Queue` and `No-CodeGraph Impact Triage`; inspect the highest-score files first.
-- For changed shared/public/source files, read the file, its direct importer hints, symbol reference hints, deleted-file reference hints, bug/security hints, and nearby/importing test hints.
-- For deleted and renamed files, verify every deleted-path reference hint and search only for concrete unresolved names/paths that remain ambiguous.
-- For changed dependency files, inspect the dependency deltas and consistency warnings before reviewing runtime code.
-- For changed config, migration, route, API, command, or entrypoint files, trace one user-facing or runtime flow manually from entrypoint to side effects and look for logic bugs along the path.
-- If the script reports no direct importers, use language-native tools before generic grep: package manager test discovery, `go list`, `cargo metadata`, `python -m pytest --collect-only`, framework route manifests, or project-specific build commands when available.
-- Keep residual risk explicit where local heuristics cannot resolve dynamic imports, framework conventions, reflection, dependency injection, generated code, or runtime wiring.
+## Monolithic Workflow (Single-Agent Fallback)
 
-## Review Workflow
-
-1. Establish branch metadata:
-   - Current branch, inferred or provided branch start, start mode, commit range, commits since branch start.
-   - Whether working tree changes are included.
-   - Framework/runtime and test commands from package or build config.
-   - Whether CodeGraph was available; if not, confirm the no-CodeGraph impact script was run.
-
-2. Inventory the branch:
-   - Added, modified, deleted, and renamed files.
-   - New directories and file tree changes.
-   - Dependency manifest and lockfile changes.
-   - Generated assets, build outputs, migrations, schema files, fixtures, and tests.
-
-3. Classify changed files:
-   - Feature entry points: pages, routes, controllers, API handlers, screens, commands.
-   - Shared surfaces: common components, UI primitives, hooks, utilities, stores, service clients, config, middleware, package exports.
-   - Domain logic: validators, transforms, business rules, data access, permission checks.
-   - Tests and docs.
-
-4. Analyze impact:
-   - For each shared surface, identify direct callers/importers and likely indirect flows.
-   - For each new public component or exported API, inspect props, defaults, accessibility, loading/error/empty states, and call sites.
-   - For modified public files, compare old and new behavior, not only syntax.
-   - For package changes, inspect version risk, bundle/runtime impact, lockfile consistency, and whether the dependency is actually used.
-   - Without CodeGraph, use the script's bug hunt queue, risk queue, direct importer hints, symbol reference hints, deleted-file reference hints, and test hints to choose what to read next.
-
-5. **Hunt bugs and review behavior** (required):
-   - Follow `references/bug-hunting-checklist.md`.
-   - Correctness, edge cases, data shape changes, race conditions, caching, auth/permission boundaries, persistence, navigation, error handling.
-   - UI regressions across responsive states when frontend is involved.
-   - Test gaps for changed behavior — use `references/testing-review.md`.
-   - Security when applicable — use `references/security-checklist.md`.
-
-6. Verify selectively:
-   - Run focused tests/build/lint when available and reasonable.
-   - For frontend changes, start the app and use browser verification when the UI behavior is central to the review.
-   - If verification cannot run, say why and keep the residual risk explicit.
+1. Establish branch metadata and run context script.
+2. Inventory added/modified/deleted/renamed files and dependencies.
+3. Classify entry points, shared surfaces, domain logic, tests.
+4. Analyze impact (callers, flows, package risk).
+5. Hunt bugs (`bug-hunting-checklist.md`), security (`security-checklist.md`), tests (`testing-review.md`).
+6. Verify selectively; note residual risk.
 
 ## Large Branch Strategy
 
-When the branch exceeds ~50 changed files or ~2000 added lines in diff stat:
+When changed files > ~50 or diff stat > ~2000 lines:
 
-- Review `Bug Hunt Queue` top entries and all entrypoint/migration/shared files first.
-- Batch by domain; list files not deeply reviewed and their residual risk.
-- Consider `review-bugbot` for merge-base logic coverage after branch-local pass.
+- Parallel agents still run; Bug Hunt focuses on Bug Hunt Queue top entries + all entrypoint/migration/shared files.
+- Trigger Bugbot pass (Phase 2).
+- List files not deeply reviewed under Agent Coverage.
 
 ## Required Report Shape
 
-Produce the review in this order:
+0. **Verdict**: Request changes / Approve with nits / Approve; release risk; must-fix count; start mode; **agents run**.
 
-0. **Verdict** (one block):
-   - **Verdict**: Request changes / Approve with nits / Approve
-   - **Release risk**: High / Medium / Low
-   - **Must-fix before merge**: count and short list
-   - **Start mode**: branch-local reflog / explicit `--start` / merge-base-with=…
-
-1. Findings first, ordered by severity:
-   - **Bugs and regressions first** within each severity band when possible.
-   - `P0` blocks release or causes data/security loss.
-   - `P1` likely user-visible breakage, serious regression, or exploitable issue.
-   - `P2` meaningful bug, missing coverage, or fragile shared behavior.
-   - `P3` maintainability or small correctness risk.
-   - Include file and line references when possible.
-   - For bugs: trigger, expected vs actual, evidence, suggested fix.
-   - **Confidence**: High / Medium / Low per finding when not proven by test.
+1. **Findings** (P0→P3, bugs first) with source tag `[Bug Hunt]` / `[Security]` / `[Bugbot]` / etc.
 
 2. Open questions and assumptions.
 
-3. Branch inventory:
-   - Branch start/head/range/start mode.
-   - Added/modified/deleted/renamed files.
-   - New file tree/directories.
-   - Dependency changes.
+3. Branch inventory.
 
-4. Impact map:
-   - Shared/public files touched.
-   - Public components/hooks/utilities/APIs changed or added.
-   - Direct dependent files and important flows.
+4. Impact map (from Impact Agent artifact).
 
-5. Verification:
-   - Commands run and results.
-   - Browser/manual checks if performed.
-   - Tests not run and remaining risk.
-   - Impact-analysis mode used: CodeGraph, no-CodeGraph local impact map, or both.
-   - Optional second passes: Bugbot, Security Review.
+5. Verification + **Agent Coverage** (who ran, what was skipped, residual risk).
 
-If no actionable findings are found, say so clearly, then still provide inventory, impact map, test gaps, and **residual bug risks you could not disprove**.
+Use `references/report-template.md`.
 
 ## Review Standards
 
-- **Find real bugs.** Impact analysis alone is insufficient; trace failure modes and compare old vs new behavior.
-- Do not report pattern hints as findings without validating them in context.
-- Do not spend the review praising the code. Mention good context only when it changes the risk assessment.
-- Do not report style-only issues unless they create concrete maintenance or behavior risk.
-- Do not assume a changed shared file is safe because the diff is small. Inspect its callers or impact.
-- Do not rely on generated summaries alone. Read the highest-risk files directly.
-- Do not treat no-CodeGraph mode as permission for grep-only review. Use the local impact map and bug hunt queue first.
-- Do not ignore deleted files; confirm all references were removed or migrated.
-- Do not ignore added files; confirm they are wired into the app, tested, and named consistently.
-- Do not ignore lockfiles; dependency changes are part of the code review.
+- **Find real bugs.** Impact analysis alone is insufficient.
+- Do not report unvalidated pattern hints as findings.
+- Merge subagent outputs with dedupe; prefer evidence-backed findings.
+- Do not praise code unless it changes risk assessment.
+- Do not report style-only issues unless they create behavior risk.
+- Do not ignore deleted files, added wiring, or lockfiles.
 
 ## References
 
-- Read `references/bug-hunting-checklist.md` for every review — required for bug-focused findings.
-- Read `references/security-checklist.md` when the branch touches auth, input handling, secrets, crypto, or dependencies.
-- Read `references/testing-review.md` when judging coverage and verification gaps.
-- Read `references/review-checklist.md` when the branch touches frontend UI, APIs, auth, data persistence, shared components, or dependency manifests.
-- Read `references/report-template.md` when producing a formal review artifact.
+- `references/multi-agent-orchestration.md` — **required in multi-agent mode**
+- `references/bug-hunting-checklist.md` — required for bug findings
+- `references/security-checklist.md` — auth, secrets, deps
+- `references/testing-review.md` — coverage gaps
+- `references/review-checklist.md` — UI, API, persistence
+- `references/report-template.md` — final artifact shape
 
-## Optional Follow-Up Skills
+## Related Skills
 
-- `review-bugbot` — second opinion on logic bugs vs default/base branch; use when branch is large or bugs span many files.
-- `review-security` — dedicated security subagent when hints or surfaces warrant deeper exploit analysis.
-- `split-to-prs` — when the branch is too large to review safely as one unit.
+- `review-bugbot` — Phase 2 logic pass vs base branch (orchestrated automatically on large branches)
+- `review-security` — same subagent as Security Agent; prefer orchestration dispatch
+- `split-to-prs` — branch too large to review safely as one unit

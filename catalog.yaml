@@ -1,0 +1,18 @@
+# Agent Skills catalog for this repository
+# https://agentskills.io
+
+repository: https://github.com/ryan-vn/branch-code-review
+license: MIT
+
+skills:
+  - name: branch-code-review
+    path: .
+    description: >-
+      Branch-local code review with multi-agent orchestration, impact analysis,
+      bug hunting, and security checks from branch creation to HEAD.
+    requires:
+      - python3
+      - git
+    optional:
+      - codegraph-mcp
+      - cursor-subagents

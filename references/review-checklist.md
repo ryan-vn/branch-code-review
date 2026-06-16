@@ -4,6 +4,7 @@ Use this checklist selectively. Prioritize sections that match the changed files
 
 **Required companion docs:**
 
+- `multi-agent-orchestration.md` — default multi-agent dispatch and merge rules.
 - `bug-hunting-checklist.md` — find concrete bugs and regressions (required every review).
 - `security-checklist.md` — when auth, input, secrets, crypto, or deps changed.
 - `testing-review.md` — when judging whether behavior is actually covered.
