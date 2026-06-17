@@ -11,7 +11,7 @@ metadata:
   author: ryan-vn
   repository: https://github.com/ryan-vn/branch-code-review
   license: MIT
-  version: "1.3.0"
+  version: "1.3.1"
 ---
 
 # Branch Code Review
@@ -53,9 +53,10 @@ Phase 3  Orchestrator → merge artifacts → final report
 
 **Platform mapping:** the `subagent_type` values above are Cursor-specific.
 
-- **Claude Code:** read `references/claude-code.md` completely before Phase 1. Install parallel
-  subagents (`install.sh --target claude`). Dispatch **branch-review-impact**, **branch-review-bugs**,
-  and **branch-review-security** (when applicable) via **multiple Agent tool calls in one turn**.
+- **Claude Code:** read `references/claude-code.md` completely before Phase 1. **Phase 0 Step 0:**
+  bootstrap `branch-review-*` subagents from `<skill-dir>/agents/claude/` into `~/.claude/agents/`
+  if missing (see `claude-code.md`). Then dispatch named agents in parallel; Explore +
+  general-purpose is fallback only.
 - **Codex:** map to its research agent equivalent.
 
 If a platform has no equivalent for a specialized role (`bugbot`, `security-review`), **skip

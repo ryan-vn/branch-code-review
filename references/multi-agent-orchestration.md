@@ -73,13 +73,15 @@ Rules:
 ## Phase 0 — Orchestrator Prepare
 
 1. Confirm repository root and branch metadata (`git status --short --branch`).
-2. Run context collection:
+2. **Claude Code only:** bootstrap named subagents if missing — see `references/claude-code.md`
+   Step 0 (copy `<skill-dir>/agents/claude/*.md` → `~/.claude/agents/`).
+3. Run context collection:
 
 ```bash
 python3 <skill-dir>/scripts/collect_branch_review_context.py --include-working-tree --output work/branch-review-context.md --json-output work/branch-review-context.json
 ```
 
-3. Read `work/branch-review-context.json` (or `.md`) and extract:
+4. Read `work/branch-review-context.json` (or `.md`) and extract:
    - `repo`, `start`, `head`, `branch`, `range`, `start_mode`
    - `bug_hunt_queue` top 15 paths
    - `pattern_findings` counts (bug vs security)
@@ -87,13 +89,13 @@ python3 <skill-dir>/scripts/collect_branch_review_context.py --include-working-t
    - `test_commands`
    - diff stat / changed file count
 
-4. Decide mode:
+5. Decide mode:
    - **Multi-agent** (default): 2+ changed source files, or any shared/entrypoint/migration/dependency change.
    - **Single-agent fallback**: user asked for quick review, empty diff, or context script failed.
 
-5. Create `work/` if missing.
+6. Create `work/` if missing.
 
-6. **Tool routing gate** — read `references/tool-routing.md`:
+7. **Tool routing gate** — read `references/tool-routing.md`:
    - If CodeGraph MCP available: `codegraph_status` → precompute impact/context/trace for top triage targets → write `work/branch-review-codegraph.md`.
    - Run git via Shell (`git status --short --branch`, `git log --oneline <range>`, `git diff --stat <range>`) for RTK hook compatibility.
    - Do not start Phase 1 until context script output exists (and codegraph bundle when index is ready).

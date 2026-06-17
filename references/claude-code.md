@@ -107,8 +107,9 @@ unless `user-codegraph` tools appear in the tool list.
 | Bugbot | skip; optional `/code-review` | Phase 2, **parallel** with verify when both apply | merged into final report |
 | Verification | **branch-review-verify** | Phase 2, **parallel** with code-review when both apply | notes in final report |
 
-Fallback when subagents are not installed: built-in **Explore** (impact) and **general-purpose**
-(bug hunt) — still **must** dispatch in parallel in one turn.
+Fallback when bootstrap failed or Agent tool rejects named agents: built-in **Explore** (impact)
+and **general-purpose** (bug hunt) — still **must** dispatch in parallel in one turn. Record
+which path was used in Agent Coverage.
 
 ### Why named subagents
 
@@ -118,7 +119,55 @@ impact but is harder to parallelize with a distinct bug-hunt identity.
 
 ## Phase 0 — Orchestrator (Main Session)
 
-Same as `multi-agent-orchestration.md`, with Claude Code specifics:
+Same as `multi-agent-orchestration.md`, with Claude Code specifics.
+
+### Step 0 — Bootstrap named subagents (before context script)
+
+Claude Code loads subagents only from `~/.claude/agents/` or `<project>/.claude/agents/`.
+The skill bundle ships agent definitions under `<skill-dir>/agents/claude/` — they are **not**
+active until copied. If you only cloned the skill (common), Phase 1 will wrongly fall back to
+Explore + general-purpose unless you bootstrap first.
+
+**Orchestrator must run this check every review:**
+
+```bash
+SKILL_DIR="${SKILL_DIR:-$HOME/.claude/skills/branch-code-review}"
+AGENTS_SRC="$SKILL_DIR/agents/claude"
+AGENTS_DEST="${CLAUDE_AGENTS_DIR:-$HOME/.claude/agents}"
+
+missing=0
+for f in branch-review-impact branch-review-bugs branch-review-security branch-review-verify; do
+  if [[ ! -f "$AGENTS_DEST/${f}.md" ]]; then missing=1; break; fi
+done
+
+if [[ "$missing" -eq 1 && -d "$AGENTS_SRC" ]]; then
+  mkdir -p "$AGENTS_DEST"
+  cp "$AGENTS_SRC"/*.md "$AGENTS_DEST/"
+  echo "Bootstrapped branch-review subagents -> $AGENTS_DEST"
+fi
+
+ls -1 "$AGENTS_DEST"/branch-review-*.md 2>/dev/null || echo "WARN: named subagents still missing"
+```
+
+Resolve `SKILL_DIR` if not at default path:
+
+```bash
+# project-level skill
+[[ -d .claude/skills/branch-code-review ]] && SKILL_DIR="$(pwd)/.claude/skills/branch-code-review"
+```
+
+After bootstrap, prefer `Agent(branch-review-impact)` etc. If Agent calls fail (agent not yet
+loaded in session), retry once; then fall back to Explore + general-purpose **in parallel** and
+record `named subagents: bootstrap attempted, using built-in fallback` in Agent Coverage.
+
+One-time manual fix (same as bootstrap):
+
+```bash
+cp ~/.claude/skills/branch-code-review/agents/claude/*.md ~/.claude/agents/
+# or from this repo: ./install.sh --agents-only
+```
+
+### Steps 1–7 — Context and metadata
 
 1. Confirm target repo root (`pwd` must be git root).
 2. Run context collection via **Bash**:
