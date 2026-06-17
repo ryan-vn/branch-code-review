@@ -11,7 +11,7 @@ metadata:
   author: ryan-vn
   repository: https://github.com/ryan-vn/branch-code-review
   license: MIT
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # Branch Code Review
@@ -46,13 +46,20 @@ Phase 3  Orchestrator → merge artifacts → final report
 | Bugbot | `bugbot`, readonly | merged into final report |
 | Verification | `shell` | verification notes in final report |
 
-**Platform mapping:** the `subagent_type` values above are Cursor-specific. On Claude Code
-use `Task` with `general-purpose` (or the platform's read-only research agent); on Codex use
-its equivalent. If a platform has no equivalent for a specialized role (`bugbot`,
-`security-review`), **skip that pass and record it under Agent Coverage** — never let
-dispatch silently fail. If no read-only parallel subagent exists, use single-agent fallback.
+**Platform mapping:** the `subagent_type` values above are Cursor-specific.
 
-Dispatch Impact + Bug Hunt (+ Security when applicable) **in one message with parallel Task calls**. Subagents get **self-contained prompts** from the orchestration doc — never rely on chat history.
+- **Claude Code:** read `references/claude-code.md` completely before Phase 1. Dispatch Impact
+  via **Explore**, Bug Hunt via **general-purpose**, Security via bundled `/security-review` or
+  general-purpose. Use the **Agent** tool for parallel spawn — not Cursor `Task`.
+- **Codex:** map to its research agent equivalent.
+
+If a platform has no equivalent for a specialized role (`bugbot`, `security-review`), **skip
+that pass and record it under Agent Coverage** — never let dispatch silently fail. If no
+read-only parallel subagent exists, use single-agent fallback.
+
+Dispatch Impact + Bug Hunt (+ Security when applicable) **in one message with parallel subagent
+calls** (Cursor: Task; Claude Code: Agent tool — see `claude-code.md`). Subagents get
+**self-contained prompts** from the orchestration doc — never rely on chat history.
 
 After subagents return, merge with dedupe rules in the orchestration doc and produce the report from `references/report-template.md`.
 
@@ -190,6 +197,7 @@ a long list of low-value items; trim inventory/impact sections when they add no 
 
 ## References
 
+- `references/claude-code.md` — **required on Claude Code** before Phase 1 dispatch
 - `references/severity-definitions.md` — **required** P0–P3 + Confidence + verdict matrix
 - `references/multi-agent-orchestration.md` — **required in multi-agent mode**
 - `references/tool-routing.md` — **required** CodeGraph + fallback routing

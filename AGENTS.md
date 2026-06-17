@@ -61,5 +61,5 @@ python3 <this-skill-dir>/scripts/collect_branch_review_context.py \
 
 - Branch from `main`. No CI, release, or pre-commit pipeline is configured.
 - `references/tool-routing.md` governs CodeGraph/RTK/fallback tool use and is required at
-  runtime; it is wired into `SKILL.md` and `multi-agent-orchestration.md` — keep all three
-  in sync when changing tool-dispatch behavior.
+  runtime; it is wired into `SKILL.md`, `multi-agent-orchestration.md`, and `claude-code.md` —
+  keep all four in sync when changing tool-dispatch or platform mapping behavior.

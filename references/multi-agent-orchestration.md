@@ -24,11 +24,13 @@ closest read-only research/general subagent:
 
 | Role | Cursor | Claude Code | Codex | If unavailable |
 |------|--------|-------------|-------|----------------|
-| Impact | `explore` | `Task` `general-purpose` | research agent | fold into Bug Hunt agent |
-| Bug Hunt | `generalPurpose` | `Task` `general-purpose` | research agent | single-agent fallback |
-| Security | `security-review` | `Task` `general-purpose` | research agent | skip; note in Agent Coverage |
-| Bugbot | `bugbot` | only if skill installed | — | skip; note in Agent Coverage |
-| Verification | `shell` | `Bash` | shell | skip; note residual risk |
+| Impact | `explore` | **Explore** (Agent tool) | research agent | fold into Bug Hunt agent |
+| Bug Hunt | `generalPurpose` | **general-purpose** (Agent tool) | research agent | single-agent fallback |
+| Security | `security-review` | **`/security-review`** skill or general-purpose | research agent | skip; note in Agent Coverage |
+| Bugbot | `bugbot` | skip; optional bundled `/code-review` | — | skip; note in Agent Coverage |
+| Verification | `shell` | general-purpose + **Bash** | shell | skip; note residual risk |
+
+Claude Code details: `references/claude-code.md`.
 
 Rules:
 

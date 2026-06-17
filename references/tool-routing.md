@@ -2,6 +2,9 @@
 
 Follow this routing **before** reading files ad hoc or running broad searches. Skills are instructions — compliance is measured by **which tools you actually call**. The final report must include a **Tool Usage** line listing CodeGraph, RTK-eligible shell, and fallback tools used.
 
+**Claude Code:** use **Bash** instead of Shell; default to **No-CodeGraph mode** unless MCP is
+present. See `references/claude-code.md` for platform dispatch.
+
 ## Phase 0 Gate (Orchestrator, before subagents)
 
 Run in order:
