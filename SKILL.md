@@ -11,7 +11,7 @@ metadata:
   author: ryan-vn
   repository: https://github.com/ryan-vn/branch-code-review
   license: MIT
-  version: "1.2.0"
+  version: "1.3.0"
 ---
 
 # Branch Code Review
@@ -28,12 +28,17 @@ Use this skill to review an entire branch, not only isolated diff hunks. The rev
 
 Unless the user asks for a **quick** or **single-agent** review, run **multi-agent orchestration**.
 
+**Parallel-first:** review agents run **simultaneously**, not one after another. Phase 0 (orchestrator
+collects context once) → Phase 1 (Impact + Bug Hunt [+ Security] **in the same turn**) → Phase 2
+(optional follow-ups, may also parallelize) → Phase 3 (merge). Never run Impact, wait for it to
+finish, then start Bug Hunt — that defeats the design.
+
 Read and follow `references/multi-agent-orchestration.md` completely.
 
 ```text
 Phase 0  Orchestrator → collect context (script) + branch metadata
-Phase 1  Parallel     → Impact Agent + Bug Hunt Agent [+ Security Agent]
-Phase 2  Sequential   → Bugbot (large branch) + Verification (tests)
+Phase 1  Parallel     → Impact + Bug Hunt [+ Security]  (same turn)
+Phase 2  Parallel     → Bugbot/code-review + Verification when both apply (same turn)
 Phase 3  Orchestrator → merge artifacts → final report
 ```
 
@@ -48,9 +53,9 @@ Phase 3  Orchestrator → merge artifacts → final report
 
 **Platform mapping:** the `subagent_type` values above are Cursor-specific.
 
-- **Claude Code:** read `references/claude-code.md` completely before Phase 1. Dispatch Impact
-  via **Explore**, Bug Hunt via **general-purpose**, Security via bundled `/security-review` or
-  general-purpose. Use the **Agent** tool for parallel spawn — not Cursor `Task`.
+- **Claude Code:** read `references/claude-code.md` completely before Phase 1. Install parallel
+  subagents (`install.sh --target claude`). Dispatch **branch-review-impact**, **branch-review-bugs**,
+  and **branch-review-security** (when applicable) via **multiple Agent tool calls in one turn**.
 - **Codex:** map to its research agent equivalent.
 
 If a platform has no equivalent for a specialized role (`bugbot`, `security-review`), **skip
@@ -58,8 +63,9 @@ that pass and record it under Agent Coverage** — never let dispatch silently f
 read-only parallel subagent exists, use single-agent fallback.
 
 Dispatch Impact + Bug Hunt (+ Security when applicable) **in one message with parallel subagent
-calls** (Cursor: Task; Claude Code: Agent tool — see `claude-code.md`). Subagents get
-**self-contained prompts** from the orchestration doc — never rely on chat history.
+calls** (Cursor: Task; Claude Code: Agent tool — see `claude-code.md`). When Phase 2 triggers
+both Bugbot and Verification, dispatch them **in one parallel message** too — do not run
+verification after Bugbot finishes.
 
 After subagents return, merge with dedupe rules in the orchestration doc and produce the report from `references/report-template.md`.
 

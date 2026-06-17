@@ -4,18 +4,54 @@
 Codex CLI with Claude-style Agent tool). It overrides Cursor-specific names in `SKILL.md` and
 supplements `references/multi-agent-orchestration.md`.
 
-Claude Code has no `Task`, `explore`, `bugbot`, or `security-review` subagent types. Use the
-mappings and dispatch patterns below instead.
+Claude Code has no Cursor `Task` or `subagent_type`. Use **named parallel subagents** installed
+from this skill (`agents/claude/`) and the **Agent tool** — multiple calls in **one turn**.
+
+## Parallel-First (Core Design)
+
+Review agents **run at the same time**, not in sequence.
+
+```text
+Phase 0  [Orchestrator]  context script + git metadata  (alone — sequential)
+         │
+Phase 1  ├─► branch-review-impact   ──┐
+         ├─► branch-review-bugs     ──┼── SAME TURN, parallel Agent calls
+         └─► branch-review-security ──┘   (security when triggers apply)
+         │
+         ▼  wait for ALL Phase 1 agents
+Phase 2  ├─► /code-review (logic pass) ──┐  same turn when BOTH triggers apply
+         └─► branch-review-verify      ──┘
+         │
+         ▼  wait for ALL Phase 2 agents (or note partial failure)
+Phase 3  [Orchestrator]  merge artifacts → final report
+```
+
+**Forbidden:** Impact finishes → then Bug Hunt starts → then Security. That is single-agent
+behavior disguised as multi-agent.
+
+**Required:** Orchestrator sends **2–3 Agent tool invocations in one assistant message**.
+Each agent writes its own artifact under `work/` independently.
 
 ## Install And Invoke
 
 ```bash
-# From this skill repo
+# Skill + parallel review subagents (recommended for Claude Code)
 ./install.sh --target claude
 
-# Or manually
-git clone git@github.com:ryan-vn/branch-code-review.git ~/.claude/skills/branch-code-review
+# Skill only, no subagents
+./install.sh --target claude --no-agents
 ```
+
+`--target claude` installs:
+
+| Destination | Contents |
+|-------------|----------|
+| `~/.claude/skills/branch-code-review/` | Skill, scripts, references |
+| `~/.claude/agents/branch-review-*.md` | Impact, Bug Hunt, Security subagents |
+
+Subagents enable reliable **parallel** dispatch: orchestrator calls
+`Agent(branch-review-impact)`, `Agent(branch-review-bugs)`, and optionally
+`Agent(branch-review-security)` in one turn.
 
 Run the skill **from the target project's git root**, not from the skill directory.
 
@@ -62,32 +98,23 @@ unless `user-codegraph` tools appear in the tool list.
 
 ## Agent Mapping
 
-| Role | Claude Code dispatch | Read-only? | Output artifact |
-|------|----------------------|------------|-----------------|
-| Orchestrator | Main session (you) | n/a | `work/branch-review-context.md`, final report |
-| Impact | **Explore** subagent | Yes | `work/branch-review-impact.md` |
-| Bug Hunt | **general-purpose** subagent | Prefer Read/Grep only in prompt | `work/branch-review-bugs.md` |
-| Security | **`/security-review`** bundled skill **or** general-purpose + `security-checklist.md` | Yes | `work/branch-review-security.md` |
-| Bugbot | **Skip** (no equivalent). Optional weak substitute: bundled `/code-review` | Yes | merged into final report |
-| Verification | **general-purpose** with Bash | Run tests only | notes in final report |
+| Role | Claude Code subagent | Parallel in Phase 1? | Output artifact |
+|------|----------------------|----------------------|-----------------|
+| Orchestrator | Main session | No (runs alone in Phase 0/3) | `work/branch-review-context.md`, final report |
+| Impact | **branch-review-impact** | **Yes** | `work/branch-review-impact.md` |
+| Bug Hunt | **branch-review-bugs** | **Yes** | `work/branch-review-bugs.md` |
+| Security | **branch-review-security** | **Yes** (when triggered) | `work/branch-review-security.md` |
+| Bugbot | skip; optional `/code-review` | Phase 2, **parallel** with verify when both apply | merged into final report |
+| Verification | **branch-review-verify** | Phase 2, **parallel** with code-review when both apply | notes in final report |
 
-### Why Explore for Impact
+Fallback when subagents are not installed: built-in **Explore** (impact) and **general-purpose**
+(bug hunt) — still **must** dispatch in parallel in one turn.
 
-Claude Code's **Explore** agent is read-only and optimized for codebase search. It skips
-`CLAUDE.md` and parent git status — that is fine because Impact prompts must be
-**self-contained** (paths to context + codegraph bundle + absolute repo root).
+### Why named subagents
 
-### Security pass options
-
-1. **Preferred when available:** invoke bundled `/security-review` via the Skill tool. Pass a
-   natural-language change description built from `work/branch-review-context.md` (auth/api/config
-   files grouped by provider security pattern hints). Save structured output to
-   `work/branch-review-security.md`.
-2. **Fallback:** spawn **general-purpose** with the Security Agent prompt from
-   `multi-agent-orchestration.md` and `references/security-checklist.md`.
-
-There is no Cursor `review-bugbot` / `review-security` skill on Claude Code unless you install
-them separately. Skipping is normal — record under Agent Coverage.
+Dedicated agents (`agents/claude/*.md`) give the orchestrator stable `Agent(name)` targets so
+Claude Code spawns **separate context windows simultaneously**. Built-in Explore works for
+impact but is harder to parallelize with a distinct bug-hunt identity.
 
 ## Phase 0 — Orchestrator (Main Session)
 
@@ -127,26 +154,52 @@ git diff --stat <start>..HEAD
 
 Do **not** paste full diffs into chat — subagents read `work/branch-review-context.md`.
 
-## Phase 1 — Parallel Dispatch (Agent Tool)
+## Phase 1 — Simultaneous Parallel Dispatch
 
-Launch **Impact (Explore)** and **Bug Hunt (general-purpose)** in the **same turn** using
-parallel Agent tool calls. Add Security in parallel when triggers in orchestration doc apply.
+After Phase 0 completes, the orchestrator **must not analyze code itself** beyond reading
+context JSON for dispatch decisions. Immediately spawn review agents **in parallel**.
 
-Claude Code pattern (natural language that reliably spawns parallel subagents):
+### Step 1 — Fill prompt templates
+
+Copy Impact / Bug Hunt / Security prompts from `multi-agent-orchestration.md`. Replace
+`<absolute repo path>`, `<skill-dir>`, `<start>`, `<head>`, `<range>`, `<start_mode>`.
+
+### Step 2 — One message, multiple Agent calls
+
+Send **one orchestrator message** containing **2 or 3 parallel Agent tool invocations**:
 
 ```text
-Use the Agent tool to run these two subagents in parallel in the same message:
+Phase 1 parallel dispatch — run ALL of the following subagents simultaneously in this turn.
+Do not start the next agent after another finishes.
 
-1. Explore subagent (thoroughness: medium) — Impact Analysis Agent. Write work/branch-review-impact.md.
-   <paste Impact Agent prompt from multi-agent-orchestration.md with absolute paths filled in>
+Agent(branch-review-impact):
+<paste Impact Agent prompt>
 
-2. general-purpose subagent — Bug Hunt Agent. Write work/branch-review-bugs.md.
-   <paste Bug Hunt Agent prompt from multi-agent-orchestration.md with absolute paths filled in>
+Agent(branch-review-bugs):
+<paste Bug Hunt Agent prompt>
+
+Agent(branch-review-security):   # omit entire block when Security triggers do not apply
+<paste Security Agent prompt>
 ```
 
-When Security applies, add a third parallel dispatch (`/security-review` or general-purpose).
+Claude Code executes these subagents **concurrently** — each in its own context window — then
+returns summaries to the orchestrator.
 
-### Subagent constraints (repeat in every prompt)
+### Step 3 — Wait, then merge
+
+Do **not** start Phase 2 until **every** spawned Phase 1 agent has returned (or failed after
+one retry). Read artifacts from `work/` — not from chat paraphrase.
+
+### Anti-patterns
+
+| Wrong | Right |
+|-------|-------|
+| Run impact, read result, then spawn bug hunt | Spawn impact + bug hunt together |
+| One general-purpose agent does impact then bugs | Separate agents, parallel |
+| Orchestrator reads all files before spawning agents | Orchestrator only runs context script + dispatch |
+| Security runs after bug hunt completes | Security in same turn as impact + bug hunt when triggered |
+
+### Subagent constraints (include in every delegation prompt)
 
 - Read-only: do not Edit, Write, or commit.
 - Do **not** call CodeGraph MCP — read `work/branch-review-codegraph.md` if present.
@@ -154,22 +207,59 @@ When Security applies, add a third parallel dispatch (`/security-review` or gene
 - Write the artifact file under `work/` before returning.
 - Return a 3–5 sentence summary + artifact path + P0–P3 counts (Bug Hunt / Security).
 
-### Explore-specific note
+Include repo-specific ignore rules (e.g. skip `vendor/`, `node_modules/`) in prompts when needed.
 
-Because Explore skips `CLAUDE.md`, include any repo-specific ignore rules (e.g. "skip `vendor/`,
-`node_modules/`") directly in the Impact prompt when the target repo requires it.
+## Phase 2 — Simultaneous Parallel Follow-Up
 
-## Phase 2 — Conditional Follow-Up
+After **all** Phase 1 agents return, Phase 2 has **two optional agents** that are **independent**
+— they can and should run **at the same time** when both triggers apply:
 
-After Phase 1 returns, run sequentially (not parallel with Phase 1):
+| Agent | Trigger | Claude Code dispatch |
+|-------|---------|----------------------|
+| Logic second pass | Large branch or incomplete Bug Hunt | `Skill(code-review)` |
+| Verification | `test_commands` present, user did not skip tests | `Agent(branch-review-verify)` |
 
-| Condition | Claude Code action |
-|-----------|---------------------|
-| Large branch (>50 files or >2000 added lines) or incomplete Bug Hunt | Optional: bundled `/code-review` as second pass. **Note in report:** it is default-branch-oriented, not branch-local reflog range. Dedupe against bug hunt findings. |
-| `test_commands` non-empty, user did not say skip tests | general-purpose subagent with Verification prompt from orchestration doc |
-| Security P0/P1 with unclear exploit path | Keep finding; do not auto-fix |
+Neither agent needs the other's output to start. Bug hunt artifacts are already on disk from
+Phase 1; verification reads `test_commands` from context JSON.
 
-**Do not** block the review waiting for Bugbot — Claude Code has no branch-local Bugbot agent.
+### Parallel dispatch (mandatory when both apply)
+
+```text
+Phase 2 parallel dispatch — run BOTH simultaneously in this turn.
+
+Agent(branch-review-verify):
+<paste Verification prompt from multi-agent-orchestration.md>
+
+Skill(code-review):
+Custom Instructions: Pass 2 after branch-local bug hunt. Dedupe against work/branch-review-bugs.md.
+Diff scope note: bundled /code-review is default-branch-oriented; branch-local scope is in work/branch-review-context.md.
+```
+
+If only verification applies (small branch + tests): spawn `branch-review-verify` alone.
+If only code-review applies (large branch, user skipped tests): spawn `/code-review` alone.
+
+### Why parallel is safe here
+
+- **Verification** runs lint/tests — does not read Bugbot output.
+- **Code-review pass** re-reads diffs and `work/branch-review-bugs.md` — does not need test results.
+- Orchestrator merges both in Phase 3; dedupe findings by location + failure mode.
+
+### Anti-patterns
+
+| Wrong | Right |
+|-------|-------|
+| Run `/code-review`, then run tests | Both in one turn |
+| Wait for verify failures before code-review | Parallel spawn |
+| Orchestrator runs tests inline instead of delegating | `Agent(branch-review-verify)` |
+
+| Condition | Notes |
+|-----------|-------|
+| Large branch or incomplete Bug Hunt | Optional `/code-review`; note merge-base vs branch-local in report |
+| `test_commands` non-empty, user did not say skip tests | `branch-review-verify` |
+| Security P0/P1 unclear exploit path | Keep finding; do not auto-fix |
+
+**Do not** block Phase 3 waiting for one Phase 2 agent if the other already failed — merge what
+returned and note gaps in Agent Coverage.
 
 ## Phase 3 — Merge And Report
 
@@ -178,9 +268,10 @@ Unchanged from `multi-agent-orchestration.md` Phase 3. Use `references/report-te
 In **Agent Coverage**, always state:
 
 - Host: Claude Code
-- Subagents used: Explore / general-purpose / `/security-review` / skipped
+- Phase 1 parallel: branch-review-impact / branch-review-bugs / branch-review-security (which ran, which skipped)
+- Phase 1 was simultaneous: yes / no (if no, explain why)
 - CodeGraph: available or no-CodeGraph mode
-- Bugbot equivalent: skipped or `/code-review` second pass
+- Phase 2 parallel: branch-review-verify + `/code-review` (which ran, simultaneous: yes/no)
 
 In **Tool Usage**, use Claude Code tool names (Bash, not Shell).
 
@@ -210,37 +301,38 @@ allowed-tools:
   - Read
   - Grep
   - Glob
-  - Agent(Explore)
+  - Agent(branch-review-impact)
+  - Agent(branch-review-bugs)
+  - Agent(branch-review-security)
+  - Agent(branch-review-verify)
   - Agent(general-purpose)
-  - Skill(security-review)
+  - Skill(code-review)
 ```
 
 Review project skills before trusting a repo — `allowed-tools` grants access without per-use
 approval.
 
-## Optional: Project Subagents
+## Subagent Source Files
 
-For teams that review often, define focused subagents in `.claude/agents/`:
+Installed from `agents/claude/` in this skill repo:
 
-```markdown
----
-name: branch-impact
-description: Branch impact analysis for branch-code-review. Read-only. Use when orchestrating branch-code-review impact pass.
-tools: Read, Grep, Glob
----
+- `branch-review-impact.md` — shared surfaces, dependents, entry points
+- `branch-review-bugs.md` — bug hunt queue, pattern validation, focused tests
+- `branch-review-security.md` — security hints, exploitable issues
+- `branch-review-verify.md` — Phase 2 lint/tests (parallel with `/code-review`)
 
-You are the Impact Agent for branch-code-review. Read the paths in the delegation message.
-Write work/branch-review-impact.md. Do not hunt logic bugs. Do not modify files.
+To reinstall subagents only:
+
+```bash
+cp agents/claude/*.md ~/.claude/agents/
 ```
-
-Then dispatch with `Agent(branch-impact)` instead of generic Explore when the description
-matches.
 
 ## Example User Prompts
 
 ```text
 /branch-code-review
-Multi-agent review since branch creation. Include working tree. Write report under work/.
+Multi-agent parallel review. Phase 1: spawn impact + bug hunt + security simultaneously.
+Include working tree. Artifacts under work/.
 ```
 
 ```text

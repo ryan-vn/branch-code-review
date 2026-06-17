@@ -39,20 +39,14 @@ Restart Cursor or start a new Agent chat. Invoke with `/branch-code-review` or a
 ### Codex / Claude Code
 
 ```bash
-python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
-  --repo ryan-vn/branch-code-review \
-  --path . \
-  --name branch-code-review
+# Claude Code: skill + parallel review subagents (recommended)
+./install.sh --target claude
+
+# Or skill only
+./install.sh --target claude --no-agents
 ```
 
-Or clone manually:
-
-```bash
-git clone git@github.com:ryan-vn/branch-code-review.git ~/.codex/skills/branch-code-review
-# or: ~/.claude/skills/branch-code-review
-```
-
-Restart Codex after install.
+Or via skill-installer / manual clone — see `references/claude-code.md` for parallel dispatch.
 
 ### Project-level (team)
 
@@ -108,7 +102,12 @@ branch-code-review/
 ├── catalog.yaml             # Skill catalog for installers
 ├── install.sh               # Local install helper
 ├── agents/
-│   └── openai.yaml          # Codex agent interface metadata
+│   ├── openai.yaml          # Codex agent interface metadata
+│   └── claude/              # Claude Code parallel subagents (installed to ~/.claude/agents/)
+│       ├── branch-review-impact.md
+│       ├── branch-review-bugs.md
+│       ├── branch-review-security.md
+│       └── branch-review-verify.md
 ├── scripts/
 │   └── collect_branch_review_context.py
 └── references/

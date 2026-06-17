@@ -24,11 +24,11 @@ closest read-only research/general subagent:
 
 | Role | Cursor | Claude Code | Codex | If unavailable |
 |------|--------|-------------|-------|----------------|
-| Impact | `explore` | **Explore** (Agent tool) | research agent | fold into Bug Hunt agent |
-| Bug Hunt | `generalPurpose` | **general-purpose** (Agent tool) | research agent | single-agent fallback |
-| Security | `security-review` | **`/security-review`** skill or general-purpose | research agent | skip; note in Agent Coverage |
-| Bugbot | `bugbot` | skip; optional bundled `/code-review` | — | skip; note in Agent Coverage |
-| Verification | `shell` | general-purpose + **Bash** | shell | skip; note residual risk |
+| Impact | `explore` | **branch-review-impact** (parallel Agent) | research agent | fold into Bug Hunt agent |
+| Bug Hunt | `generalPurpose` | **branch-review-bugs** (parallel Agent) | research agent | single-agent fallback |
+| Security | `security-review` | **branch-review-security** (parallel Agent) | research agent | skip; note in Agent Coverage |
+| Bugbot | `bugbot` | skip; optional `/code-review` (parallel with verify) | — | skip; note in Agent Coverage |
+| Verification | `shell` | **branch-review-verify** (parallel with code-review) | shell | skip; note residual risk |
 
 Claude Code details: `references/claude-code.md`.
 
@@ -100,7 +100,17 @@ python3 <skill-dir>/scripts/collect_branch_review_context.py --include-working-t
 
 ## Phase 1 — Parallel Dispatch
 
-Launch **Impact Agent** and **Bug Hunt Agent** in the **same message** (parallel Task calls).
+**Parallel-first rule (mandatory):** launch every Phase 1 review agent in **one orchestrator
+turn** with **parallel** subagent calls. Do not wait for Impact to finish before starting Bug Hunt.
+Do not run agents sequentially unless parallel dispatch failed after one retry.
+
+| Platform | Mechanism |
+|----------|-----------|
+| Cursor | Multiple `Task` tool calls in the same message |
+| Claude Code | Multiple `Agent(...)` tool calls in the same message |
+| Codex | Multiple research-agent dispatches in the same message |
+
+Launch **Impact Agent** and **Bug Hunt Agent** in parallel always.
 
 Launch **Security Agent** in parallel when **any** of:
 - `security pattern hints` exist in context
@@ -195,15 +205,55 @@ Custom Instructions: Branch-local review range <start..HEAD>. Read <skill-dir>/r
 
 After Security Agent returns, orchestrator saves a structured summary to `work/branch-review-security.md` if the subagent did not write a file.
 
-## Phase 2 — Conditional Follow-Up (Sequential)
+## Phase 2 — Parallel Follow-Up
 
-After Phase 1 agents return:
+After **all** Phase 1 agents return, evaluate Phase 2 triggers independently. When **two or
+more** apply, launch them **in parallel in one orchestrator turn** — same rule as Phase 1.
 
-| Condition | Action |
-|-----------|--------|
-| Changed files > 50 OR diff stat added lines > 2000 OR Bug Hunt Agent reports incomplete coverage | Launch `bugbot` (`review-bugbot` skill shape, Diff: `branch changes`) |
-| `test_commands` non-empty and user did not say skip tests | Launch `shell` Verification Agent with top 1-2 focused commands |
-| Security Agent found P0/P1 and exploit path unclear | Keep findings; do not auto-fix |
+```text
+         Phase 1 complete
+                │
+Phase 2  ├─► Bugbot / code-review pass  ──┐  same turn when BOTH triggers apply
+         └─► Verification (tests/lint)  ──┘
+                │
+                ▼
+         Phase 3 merge
+```
+
+**Forbidden:** run Bugbot, wait for result, then start Verification.
+
+| Condition | Agent | Cursor | Claude Code |
+|-----------|-------|--------|-------------|
+| Large branch (>50 files OR >2000 added lines OR Bug Hunt incomplete) | Logic second pass | `bugbot` (Task) | bundled `/code-review` (Skill) or skip |
+| `test_commands` non-empty, user did not say skip tests | Verification | `shell` (Task) | **branch-review-verify** (Agent) |
+| Security P0/P1 exploit path unclear | — | Keep finding; do not auto-fix | same |
+
+Skip any row whose condition does not apply. If only one row applies, spawn that agent alone.
+If both apply, spawn **both in one message**.
+
+### Phase 2 parallel dispatch (orchestrator template)
+
+```text
+Phase 2 parallel dispatch — run ALL of the following simultaneously in this turn.
+
+Agent(bugbot) OR Skill(review-bugbot):          # omit when large-branch trigger false
+<Bugbot prompt below>
+
+Agent(shell) OR Agent(branch-review-verify):  # omit when skip tests or no test_commands
+<Verification prompt below>
+```
+
+Claude Code example:
+
+```text
+Agent(branch-review-verify):
+<Verification prompt>
+
+Skill(code-review):
+Custom Instructions: Pass 2 after branch-local bug hunt. Dedupe against work/branch-review-bugs.md.
+```
+
+Cursor example: two `Task` calls in one message — `bugbot` readonly + `shell` for verification.
 
 ### Bugbot prompt (when triggered)
 
