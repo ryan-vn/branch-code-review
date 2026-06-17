@@ -96,6 +96,8 @@ python3 ~/.cursor/skills/branch-code-review/scripts/collect_branch_review_contex
 
 Outputs land in the **target project's** `work/` directory.
 
+This skill is **read-only**: no commit, push, PR, or merge operations.
+
 ## Repository layout
 
 ```

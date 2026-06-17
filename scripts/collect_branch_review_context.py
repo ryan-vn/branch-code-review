@@ -173,27 +173,30 @@ RUST_SYMBOL_RE = re.compile(
     re.MULTILINE,
 )
 
-SCAN_RULES: list[tuple[str, str, re.Pattern[str]]] = [
-    ("security", "possible_aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}")),
-    ("security", "possible_private_key_header", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
-    ("security", "possible_hardcoded_secret", re.compile(r"(?i)(api[_-]?key|secret|password|token|auth)\s*[:=]\s*['\"][^'\"]{8,}['\"]")),
-    ("security", "possible_bearer_token", re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*")),
-    ("security", "dangerous_eval", re.compile(r"\beval\s*\(")),
-    ("security", "dangerous_exec", re.compile(r"\bexec\s*\(")),
-    ("security", "dangerous_pickle_loads", re.compile(r"\bpickle\.loads\s*\(")),
-    ("security", "dangerous_yaml_load", re.compile(r"\byaml\.load\s*\((?!.*Loader\s*=\s*yaml\.SafeLoader)")),
-    ("security", "sql_string_concat", re.compile(r"(?i)(SELECT|INSERT|UPDATE|DELETE).*(?:\+|%|f['\"]|\.format\()")),
-    ("security", "dangerously_set_inner_html", re.compile(r"dangerouslySetInnerHTML")),
-    ("security", "tls_verification_disabled", re.compile(r"(?i)(rejectUnauthorized\s*:\s*false|InsecureSkipVerify\s*:\s*true)")),
-    ("bug", "empty_catch_block", re.compile(r"catch\s*\([^)]*\)\s*\{\s*\}")),
-    ("bug", "except_pass", re.compile(r"except\s*:\s*pass\b")),
-    ("bug", "ignored_promise", re.compile(r"^\s*[^/\n].*\(\)\s*;\s*$")),  # too noisy, skip
-    ("bug", "missing_await_hint", re.compile(r"^\s*(?:const|let|var)\s+\w+\s*=\s*[^;]*\.(?:then|catch)\(")),
-    ("bug", "loose_equality", re.compile(r"[^=!]==[^=]")),
-    ("bug", "todo_fixme_hack", re.compile(r"(?i)\b(TODO|FIXME|HACK|XXX)\b.*")),
-    ("bug", "console_log_leftover", re.compile(r"\bconsole\.(?:log|debug|info)\s*\(")),
-    ("bug", "debugger_statement", re.compile(r"\bdebugger\b")),
-    ("bug", "return_null_early", re.compile(r"return\s+null\s*;")),
+# Each rule: (category, rule_id, pattern, applicable_suffixes). suffixes None = all sources.
+# Rules are scoped by language to cut false positives: Python `==` is idiomatic, JS `==` is not;
+# `pickle`/`yaml.load` are Python; `dangerouslySetInnerHTML`/`console.log`/`debugger` are JS.
+SCAN_RULES: list[tuple[str, str, re.Pattern[str], set[str] | None]] = [
+    ("security", "possible_aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}"), None),
+    ("security", "possible_private_key_header", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"), None),
+    ("security", "possible_hardcoded_secret", re.compile(r"(?i)(api[_-]?key|secret|password|token|auth)\s*[:=]\s*['\"][^'\"]{8,}['\"]"), None),
+    ("security", "possible_bearer_token", re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*"), None),
+    ("security", "dangerous_eval", re.compile(r"\beval\s*\("), None),
+    ("security", "dangerous_exec", re.compile(r"\bexec\s*\("), None),
+    ("security", "dangerous_pickle_loads", re.compile(r"\bpickle\.loads\s*\("), PY_SUFFIXES),
+    ("security", "dangerous_yaml_load", re.compile(r"\byaml\.load\s*\((?!.*Loader\s*=\s*yaml\.SafeLoader)"), PY_SUFFIXES),
+    ("security", "sql_string_concat", re.compile(r"(?i)(SELECT|INSERT|UPDATE|DELETE).*(?:\+|%|f['\"]|\.format\()"), None),
+    ("security", "dangerously_set_inner_html", re.compile(r"dangerouslySetInnerHTML"), JS_SUFFIXES),
+    ("security", "tls_verification_disabled", re.compile(r"(?i)(rejectUnauthorized\s*:\s*false|InsecureSkipVerify\s*:\s*true)"), None),
+    ("bug", "empty_catch_block", re.compile(r"catch\s*\([^)]*\)\s*\{\s*\}"), JS_SUFFIXES),
+    ("bug", "except_pass", re.compile(r"except\s*:\s*pass\b"), PY_SUFFIXES),
+    # JS loose equality `==` only — excludes `===`, `!=`, `<=`, `>=` via lookarounds. Python `==` is excluded by scope.
+    ("bug", "loose_equality", re.compile(r"(?<![<>=!])==(?![=])"), JS_SUFFIXES),
+    ("bug", "console_log_leftover", re.compile(r"\bconsole\.(?:log|debug|info)\s*\("), JS_SUFFIXES),
+    ("bug", "debugger_statement", re.compile(r"\bdebugger\b"), JS_SUFFIXES),
+    # Intentionally removed as high-false-positive noise: missing_await_hint (legal promise
+    # chains), todo_fixme_hack (TODOs are not bugs), return_null_early (near-100% FP),
+    # ignored_promise. Re-enable only with language scoping and a validated low FP rate.
 ]
 
 REMOVED_LINE_RULES: list[tuple[str, str, re.Pattern[str]]] = [
@@ -202,9 +205,6 @@ REMOVED_LINE_RULES: list[tuple[str, str, re.Pattern[str]]] = [
     ("bug", "removed_validation_guard", re.compile(r"if\s+.*(?:null|undefined|None|empty|length|size|auth|permission|valid)")),
     ("bug", "removed_catch_handler", re.compile(r"\bcatch\b|\bexcept\b")),
 ]
-
-# Remove overly noisy rules after definition
-SCAN_RULES = [rule for rule in SCAN_RULES if rule[1] != "ignored_promise"]
 
 
 def run_git(args: list[str], cwd: Path, check: bool = True) -> str:
@@ -261,12 +261,57 @@ def resolve_start(repo: Path, branch: str, start_arg: str | None, start_mode: st
     return infer_branch_start(repo, branch)
 
 
+def reflog_health(repo: Path, branch: str, start: str) -> dict[str, Any] | None:
+    """Detect possible reflog truncation. `git gc` prunes reflog entries (default 90/30
+    days), which makes the inferred branch start too recent and silently omits early
+    commits from the review range. Surface entry count + warnings so the reviewer can
+    re-run with an explicit --start when the branch predates the surviving reflog."""
+    if branch == "(detached)":
+        return None
+    reflog_ref = f"refs/heads/{branch}"
+    raw = run_git(["reflog", "show", "--format=%H|%ct", reflog_ref], repo, check=False)
+    entries: list[list[str]] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or "|" not in line:
+            continue
+        entries.append(line.split("|", 1))
+    if not entries:
+        return None
+    count = len(entries)
+    oldest_sha = entries[-1][0]
+    oldest_ts = int(entries[-1][1]) if entries[-1][1].isdigit() else 0
+    range_raw = run_git(["rev-list", "--count", f"{start}..HEAD"], repo, check=False)
+    range_count = int(range_raw.strip()) if range_raw.strip().isdigit() else 0
+    warnings: list[str] = []
+    if count <= 2:
+        warnings.append(
+            "Reflog has very few entries for this branch; git gc may have pruned it and the "
+            "inferred start could omit early commits. Re-run with --start <older-commit> if "
+            "the branch predates these entries."
+        )
+    if range_count > 0 and count < range_count:
+        warnings.append(
+            f"Reflog entries ({count}) are fewer than commits in {start}..HEAD ({range_count}); "
+            "the reflog may be truncated. Verify the start commit covers the whole branch."
+        )
+    return {
+        "reflog_entries": count,
+        "oldest_reflog_sha": oldest_sha,
+        "oldest_reflog_unix_time": oldest_ts,
+        "range_commit_count": range_count,
+        "warnings": warnings,
+    }
+
+
 def collect_diff_text(repo: Path, start: str, include_working_tree: bool) -> str:
-    parts = [run_git(["diff", "-U3", f"{start}..HEAD"], repo, check=False)]
+    # `git diff <start>` compares the working tree (committed-since-start + staged + unstaged)
+    # against <start> as ONE coherent diff, so each file appears in a single `+++ b/file`
+    # segment. Concatenating `start..HEAD` + `--cached` + unstaged would emit multiple
+    # segments for the same file and corrupt line numbers in parse_added_lines.
     if include_working_tree:
-        parts.append(run_git(["diff", "-U3", "--cached"], repo, check=False))
-        parts.append(run_git(["diff", "-U3"], repo, check=False))
-    return "\n".join(part for part in parts if part)
+        return run_git(["diff", "-U3", start], repo, check=False)
+    return run_git(["diff", "-U3", f"{start}..HEAD"], repo, check=False)
 
 
 def parse_added_lines(diff_text: str) -> dict[str, list[tuple[int, str]]]:
@@ -375,11 +420,14 @@ def scan_added_lines(added_lines_by_file: dict[str, list[tuple[int, str]]]) -> l
     for path, lines in sorted(added_lines_by_file.items()):
         if not (is_source_file(path) or is_config_file(path) or is_dependency_file(path)):
             continue
+        suffix = PurePosixPath(path).suffix.lower()
         for line_no, content in lines:
             stripped = content.strip()
             if not stripped or stripped.startswith("//") or stripped.startswith("#"):
                 continue
-            for category, rule_id, pattern in SCAN_RULES:
+            for category, rule_id, pattern, applicability in SCAN_RULES:
+                if applicability is not None and suffix not in applicability:
+                    continue
                 if pattern.search(content):
                     findings.append(
                         {
@@ -1098,6 +1146,19 @@ def build_report(data: dict[str, Any]) -> str:
     grouped = group_by_status(files)
     committed_grouped = group_by_status(committed_files)
     changed_paths = [item["path"] for item in files if item["status"][0] != "D"]
+    health = data.get("reflog_health") or {}
+    reflog_health_lines: list[str] = []
+    if health:
+        reflog_health_lines = [
+            "## Reflog Health",
+            "",
+            f"- Reflog entries: `{health.get('reflog_entries')}`",
+            f"- Oldest reflog entry: `{health.get('oldest_reflog_sha')}`",
+            f"- Commits in range: `{health.get('range_commit_count')}`",
+        ]
+        for warning in health.get("warnings", []):
+            reflog_health_lines.append(f"- WARNING: {warning}")
+        reflog_health_lines.append("")
     risk_rows = [
         [
             str(target["score"]),
@@ -1135,6 +1196,7 @@ def build_report(data: dict[str, Any]) -> str:
         f"- Include working tree in analysis: `{data['include_working_tree']}`",
         f"- Working tree status: `{data['working_tree_status'] or 'clean'}`",
         "",
+        *reflog_health_lines,
         "## Commits Since Branch Start",
         "",
         data["commits"] or "No commits detected in range.",
@@ -1442,7 +1504,12 @@ def main() -> None:
     pattern_findings = scan_line_changes(added_lines, removed_lines)
     bug_hunt_queue = build_bug_hunt_queue(risk_targets, pattern_findings)
 
-    numstat = parse_numstat(run_git(["diff", "--numstat", review_range], repo))
+    # Size / trigger signals must reflect what is actually under review. When the working
+    # tree is included, `git diff <start>` covers committed + uncommitted changes against
+    # <start>; otherwise use the committed-only range. This keeps the large-branch threshold
+    # (Bugbot trigger) honest for WIP-heavy branches instead of undercounting uncommitted work.
+    diff_range = start if args.include_working_tree else review_range
+    numstat = parse_numstat(run_git(["diff", "--numstat", diff_range], repo))
     dependency_files = sorted(path for path in changed_paths if is_dependency_file(path))
     shared_files = sorted(path for path in changed_paths if is_shared_file(path))
     entrypoint_files = sorted(path for path in changed_paths if is_entrypoint_file(path))
@@ -1489,7 +1556,8 @@ def main() -> None:
         "risk_targets": risk_targets,
         "pattern_findings": pattern_findings,
         "bug_hunt_queue": bug_hunt_queue,
-        "diff_stat": run_git(["diff", "--stat", review_range], repo, check=False),
+        "diff_stat": run_git(["diff", "--stat", diff_range], repo, check=False),
+        "reflog_health": reflog_health(repo, branch, start),
     }
 
     report = build_report(data)

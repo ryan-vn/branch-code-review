@@ -17,6 +17,57 @@ Subagents must receive **self-contained prompts**. Do not assume they inherit ch
 | Bugbot Agent | `bugbot` | Large branch, or Bug Hunt incomplete | summarized in final report |
 | Verification Agent | `shell` | Test commands detected and reasonable to run | notes in final report |
 
+## Subagent Platform Mapping And Fallback
+
+The `subagent_type` column lists **Cursor** types. On other hosts, map each role to the
+closest read-only research/general subagent:
+
+| Role | Cursor | Claude Code | Codex | If unavailable |
+|------|--------|-------------|-------|----------------|
+| Impact | `explore` | `Task` `general-purpose` | research agent | fold into Bug Hunt agent |
+| Bug Hunt | `generalPurpose` | `Task` `general-purpose` | research agent | single-agent fallback |
+| Security | `security-review` | `Task` `general-purpose` | research agent | skip; note in Agent Coverage |
+| Bugbot | `bugbot` | only if skill installed | — | skip; note in Agent Coverage |
+| Verification | `shell` | `Bash` | shell | skip; note residual risk |
+
+Rules:
+
+- **Never dispatch assuming a subagent has CodeGraph MCP** unless you verified it. Precompute
+  structural context in Phase 0 and pass it via `work/branch-review-codegraph.md`.
+- If the host has **no read-only parallel subagent at all**, use the single-agent workflow in
+  SKILL.md. State this explicitly in the report's Agent Coverage section.
+- A missing external skill (`review-bugbot`, `review-security`) is a **skip**, not a failure:
+  record it under Agent Coverage and continue.
+
+## Artifact Schema (all review agents)
+
+Every review subagent writes its artifact as Markdown with a **machine-parseable finding
+format** so Phase 3 dedupe and ordering can be done mechanically. Use this exact block shape
+for each finding:
+
+```markdown
+### [SOURCE] short title
+- id: BH1|SEC1|IMP1|BUG1      # stable id within this artifact
+- location: path/to/file.ext:line
+- severity: P0|P1|P2|P3
+- confidence: High|Medium|Low
+- type: Bug|Regression|Security|Test gap|Maintainability
+- trigger: <user action/input/sequence; "n/a" for non-bugs>
+- expected_vs_actual: <what should happen vs what happens>
+- evidence: <diff hunk / caller / traced path / test failure>
+- reproduction: <smallest repro command or step; "not reproduced" if only static read>
+- suggested_fix: <smallest correction>
+```
+
+Rules:
+
+- Non-finding sections (executive summary, impact map, residual uncertainty) stay as prose.
+- Impact findings are usually P2/P3 "surface touched" notes; real bugs flow through Bug Hunt/Security.
+- If a field does not apply, write `unknown` or `n/a` — **never omit a field**, gaps break dedupe.
+- Phase 3 dedupes on `location` + `expected_vs_actual` (the failure mode), keeps the higher
+  `severity` then higher `confidence`, and merges `evidence`/`reproduction` from both entries.
+- Severity and confidence must follow `references/severity-definitions.md`.
+
 ## Phase 0 — Orchestrator Prepare
 
 1. Confirm repository root and branch metadata (`git status --short --branch`).
@@ -40,6 +91,11 @@ python3 <skill-dir>/scripts/collect_branch_review_context.py --include-working-t
 
 5. Create `work/` if missing.
 
+6. **Tool routing gate** — read `references/tool-routing.md`:
+   - If CodeGraph MCP available: `codegraph_status` → precompute impact/context/trace for top triage targets → write `work/branch-review-codegraph.md`.
+   - Run git via Shell (`git status --short --branch`, `git log --oneline <range>`, `git diff --stat <range>`) for RTK hook compatibility.
+   - Do not start Phase 1 until context script output exists (and codegraph bundle when index is ready).
+
 ## Phase 1 — Parallel Dispatch
 
 Launch **Impact Agent** and **Bug Hunt Agent** in the **same message** (parallel Task calls).
@@ -61,6 +117,8 @@ All review subagents:
 Full Repository Path: <absolute repo path>
 Skill Directory: <absolute path to branch-code-review skill>
 Branch Review Context: <absolute path>/work/branch-review-context.md
+CodeGraph Bundle: <absolute path>/work/branch-review-codegraph.md
+Tool Routing: <skill-dir>/references/tool-routing.md
 Branch Start: <start sha or ref>
 Head: <head sha>
 Range: <start..HEAD>
@@ -68,10 +126,9 @@ Start Mode: <reflog | explicit | merge-base-with=...>
 
 Role: Impact Analysis Agent (branch-code-review).
 
-Read the Branch Review Context file completely. Use CodeGraph MCP when available:
-- codegraph_impact for changed exports/shared modules
-- codegraph_callers for high-risk shared surfaces
-- codegraph_trace for one important user-facing flow
+Read the Branch Review Context and CodeGraph Bundle files completely.
+
+**Do NOT call CodeGraph MCP** — use the precomputed bundle only. Do NOT run repo-wide Grep or SemanticSearch; use bundle + context importer hints.
 
 Do NOT hunt for logic bugs — Bug Hunt Agent owns that.
 
@@ -92,14 +149,17 @@ Return a 3-5 sentence summary and confirm the artifact path.
 Full Repository Path: <absolute repo path>
 Skill Directory: <absolute path to branch-code-review skill>
 Branch Review Context: <absolute path>/work/branch-review-context.md
+CodeGraph Bundle: <absolute path>/work/branch-review-codegraph.md
 Bug Hunting Checklist: <skill-dir>/references/bug-hunting-checklist.md
+Tool Routing: <skill-dir>/references/tool-routing.md
 Branch Start: <start>
 Head: <head>
 Range: <range>
 
 Role: Bug Hunt Agent (branch-code-review).
 
-Read the context file and bug-hunting checklist. Start from Bug Hunt Queue and Bug Pattern Hints.
+Read context, codegraph bundle, and bug-hunting checklist. Start from Bug Hunt Queue and Bug Pattern Hints.
+**Do NOT call CodeGraph MCP or repo-wide Grep** — use bundle + targeted Read on queued files only.
 Validate every hint in source — hints are leads, not findings.
 
 For each proven bug/regression, include:
@@ -155,10 +215,16 @@ This is pass 2 after branch-local bug hunt. Dedupe against work/branch-review-bu
 
 ```text
 Repository: <absolute path>
-Run focused verification only — do not modify code.
+Run focused verification only — do not modify code. Honor the skill's read-only contract.
 
-From work/branch-review-context.json test_commands, run the narrowest relevant command(s) for changed areas.
-Prefer: lint/typecheck > unit tests for touched modules > full suite.
+From work/branch-review-context.json test_commands, run ONLY side-effect-free commands:
+- Allowed: lint, typecheck, and unit tests scoped to touched modules.
+- Do NOT run: e2e/integration suites, anything that writes to a DB, makes network calls,
+  sends email, or mutates shared state — unless the user explicitly approved that command.
+- If the only available command is a heavy suite (e.g. `go test ./...`, `cargo test`, full
+  e2e), do not run it; report it as residual risk and ask the user.
+
+Prefer: lint/typecheck > unit tests for touched modules > (full suite only with user approval).
 
 Return: commands run, pass/fail, relevant failure snippets, and residual risk if tests not run.
 ```
@@ -172,11 +238,11 @@ Read all artifacts:
 - Bugbot summary (if run)
 - Verification notes (if run)
 
-Merge rules:
-1. **Dedupe** by same file:line + same failure mode; keep higher severity and richer evidence.
+Merge rules (see `references/severity-definitions.md` for the Severity×Confidence matrix):
+1. **Dedupe** by `location` + `expected_vs_actual` (the failure mode); keep higher severity then higher confidence; merge `evidence`/`reproduction`.
 2. **Order findings**: P0 → P1 → P2 → P3; bugs/regressions before test gaps before maintainability.
 3. **Tag source**: `[Bug Hunt]`, `[Impact]`, `[Security]`, `[Bugbot]`, `[Orchestrator]`.
-4. **Verdict**: Request changes if any P0/P1; Approve with nits if only P2/P3; Approve if none.
+4. **Verdict**: Request changes if any P0/P1 at Confidence ≥ Medium; move Low-confidence P0/P1 to Open Questions (do not auto-block); Approve with nits if only P2/P3; Approve if none.
 5. **Conflict handling**: if agents disagree, prefer finding with direct evidence (test failure > trace > static read) and list disagreement under Open Questions.
 
 Produce final report using `references/report-template.md`.
@@ -193,6 +259,8 @@ Include **Agent Coverage** section:
 | Context script fails | Ask user for `--start`; fall back to single-agent review |
 | One parallel agent fails | Retry once; continue merge with other artifacts; note gap |
 | All parallel agents fail | Fall back to single-agent workflow in SKILL.md |
+| External skill missing (`review-bugbot`, `review-security`) | Skip that pass; record under Agent Coverage; continue merge |
+| Specialized `subagent_type` unavailable on host | Skip role or fold into another agent per Platform Mapping; record under Agent Coverage |
 | Empty diff | Stop; report no changes |
 
 ## Single-Agent Fallback

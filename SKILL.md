@@ -22,6 +22,8 @@ Use this skill to review an entire branch, not only isolated diff hunks. The rev
 
 **Primary deliverable: actionable bug and regression findings.** Impact maps, inventories, and architecture notes support bug hunting but do not replace it.
 
+**Out of scope:** This skill does not commit, push, open pull requests, merge branches, or modify application source code. It produces review artifacts under `work/` and a report only.
+
 ## Multi-Agent Mode (Default)
 
 Unless the user asks for a **quick** or **single-agent** review, run **multi-agent orchestration**.
@@ -35,14 +37,20 @@ Phase 2  Sequential   → Bugbot (large branch) + Verification (tests)
 Phase 3  Orchestrator → merge artifacts → final report
 ```
 
-| Agent | Tool | Output |
-|-------|------|--------|
-| Orchestrator | current agent | `work/branch-review-context.md`, final report |
-| Impact Agent | Task `explore`, readonly | `work/branch-review-impact.md` |
-| Bug Hunt Agent | Task `generalPurpose`, readonly | `work/branch-review-bugs.md` |
-| Security Agent | Task `security-review`, readonly | `work/branch-review-security.md` |
-| Bugbot Agent | Task `bugbot`, readonly | merged into final report |
-| Verification Agent | Task `shell` | verification notes in final report |
+| Role | Cursor subagent_type | Output |
+|------|----------------------|--------|
+| Orchestrator | (current agent) | `work/branch-review-context.md`, final report |
+| Impact | `explore`, readonly | `work/branch-review-impact.md` |
+| Bug Hunt | `generalPurpose`, readonly | `work/branch-review-bugs.md` |
+| Security | `security-review`, readonly | `work/branch-review-security.md` |
+| Bugbot | `bugbot`, readonly | merged into final report |
+| Verification | `shell` | verification notes in final report |
+
+**Platform mapping:** the `subagent_type` values above are Cursor-specific. On Claude Code
+use `Task` with `general-purpose` (or the platform's read-only research agent); on Codex use
+its equivalent. If a platform has no equivalent for a specialized role (`bugbot`,
+`security-review`), **skip that pass and record it under Agent Coverage** — never let
+dispatch silently fail. If no read-only parallel subagent exists, use single-agent fallback.
 
 Dispatch Impact + Bug Hunt (+ Security when applicable) **in one message with parallel Task calls**. Subagents get **self-contained prompts** from the orchestration doc — never rely on chat history.
 
@@ -84,6 +92,21 @@ With explicit start or merge-base mode — see `references/multi-agent-orchestra
 
 Context includes: inventory, bug hunt queue, bug/security pattern hints, impact triage, dependency deltas, test commands. Subagents and orchestrator must read this file — do not substitute ad-hoc git diffs alone.
 
+## Tool Routing (Required)
+
+Read and follow `references/tool-routing.md` for **every** review.
+
+**Phase 0 gate (orchestrator, before subagents):**
+
+1. Run context script (above).
+2. If `user-codegraph` MCP is available: `codegraph_status` → precompute impact/context/trace for top triage files → write `work/branch-review-codegraph.md`.
+3. Use **Shell** for git metadata (`git status`, `git log --oneline <range>`, `git diff --stat`) so RTK hooks can rewrite commands when installed.
+4. Do **not** use Grep/SemanticSearch/Glob loops for symbol or caller lookup when CodeGraph is ready.
+
+Subagents often **lack CodeGraph MCP** — pass precomputed `work/branch-review-codegraph.md` in their prompts.
+
+Final report must include **Tool Usage** (CodeGraph calls, RTK-eligible shell, fallback Grep/Read counts).
+
 ## Bug Hunting (Required)
 
 Owned by **Bug Hunt Agent** in multi-agent mode; orchestrator validates merge quality.
@@ -106,18 +129,21 @@ Owned by **Security Agent** in multi-agent mode when security surfaces or hints 
 
 ## Structural Analysis
 
-When CodeGraph MCP is available:
+When CodeGraph MCP is available, **mandatory** — follow `references/tool-routing.md`:
 
-- `codegraph_context` — focused context
-- `codegraph_impact` — changed exports/shared modules (Impact Agent)
-- `codegraph_callers` — shared surface callers
-- `codegraph_trace` — user-facing / API flows (Bug Hunt Agent)
+- Phase 0: `codegraph_status` → precompute bundle → `work/branch-review-codegraph.md`
+- `codegraph_context` — focused context (prefer over SemanticSearch + Read loops)
+- `codegraph_impact` — changed exports/shared modules
+- `codegraph_callers` / `codegraph_callees` — dependency direction
+- `codegraph_trace` — one user-facing flow per review minimum
+- `codegraph_explore` — multiple symbols in one call
+- **Do not grep first** for symbol/caller questions when index is ready
 
-If CodeGraph is not initialized, ask whether to run `codegraph init -i`.
+If CodeGraph reports not initialized, ask whether to run `codegraph init -i`; then use no-CodeGraph mode.
 
 ## No-CodeGraph Impact Mode
 
-When CodeGraph is unavailable, use `work/branch-review-context.md` as the local impact map. Do not downgrade to grep-only review. Impact Agent and Bug Hunt Agent must still read highest-risk files directly.
+When CodeGraph is unavailable, use `work/branch-review-context.md` as the local impact map. Do not downgrade to repo-wide Grep. Grep only for literal strings after triage queue and importer hints are exhausted.
 
 ## Monolithic Workflow (Single-Agent Fallback)
 
@@ -138,11 +164,11 @@ When changed files > ~50 or diff stat > ~2000 lines:
 
 ## Required Report Shape
 
-0. **Verdict**: Request changes / Approve with nits / Approve; release risk; must-fix count; start mode; **agents run**.
+0. **Verdict**: Request changes / Approve with nits / Approve per the Severity×Confidence matrix (`references/severity-definitions.md`); release risk; must-fix finding IDs; start mode; **agents run**.
 
-1. **Findings** (P0→P3, bugs first) with source tag `[Bug Hunt]` / `[Security]` / `[Bugbot]` / etc.
+1. **Findings** (P0→P3, bugs first), each with a stable **ID** (F1…), source tag `[Bug Hunt]` / `[Security]` / `[Bugbot]` / etc., severity, confidence, and reproduction step.
 
-2. Open questions and assumptions.
+2. Open questions and assumptions (Low-confidence P0/P1 go here, not in Findings).
 
 3. Branch inventory.
 
@@ -150,7 +176,8 @@ When changed files > ~50 or diff stat > ~2000 lines:
 
 5. Verification + **Agent Coverage** (who ran, what was skipped, residual risk).
 
-Use `references/report-template.md`.
+Use `references/report-template.md`. Prefer **depth over breadth**: a few proven bugs beat
+a long list of low-value items; trim inventory/impact sections when they add no risk signal.
 
 ## Review Standards
 
@@ -163,7 +190,9 @@ Use `references/report-template.md`.
 
 ## References
 
+- `references/severity-definitions.md` — **required** P0–P3 + Confidence + verdict matrix
 - `references/multi-agent-orchestration.md` — **required in multi-agent mode**
+- `references/tool-routing.md` — **required** CodeGraph + fallback routing
 - `references/bug-hunting-checklist.md` — required for bug findings
 - `references/security-checklist.md` — auth, secrets, deps
 - `references/testing-review.md` — coverage gaps

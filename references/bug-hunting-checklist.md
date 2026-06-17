@@ -80,10 +80,14 @@ Bugbot compares against the repository default/base branch. Use branch-code-revi
 
 ## Finding Format
 
-Each bug finding must include:
+Each bug finding must follow the artifact schema in `references/multi-agent-orchestration.md`.
+At minimum:
 
+- **ID**: stable within the artifact (e.g. BH1, BH2).
 - **Trigger**: user action, input, or sequence that exposes the bug.
 - **Expected vs actual**: what should happen vs what will happen.
 - **Evidence**: file/line, caller, test failure, or traced path.
-- **Severity**: P0–P3 using the skill severity definitions.
+- **Reproduction**: smallest repro command/step, or "not reproduced (static read only)".
+- **Severity**: P0–P3 per `references/severity-definitions.md`.
+- **Confidence**: High / Medium / Low per the Severity×Confidence matrix.
 - **Suggested fix**: smallest correction that preserves intended behavior.
